@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Rust WASM Tetris - ColdClear2 Duel</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="chip"></div>
+      <div>
+        <div>Rust + WebAssembly Tetris</div>
+        <small class="muted">1v1 vs ColdClear2 (TBP ready)</small>
+      </div>
+    </div>
+    <div class="muted">Guideline playfield · SRS kicks · Hold · 7bag / LoveTris / custom</div>
+  </header>
+
+  <main class="layout">
+    <section class="boards">
+      <div class="board-card">
+        <div class="board-header">
+          <div>Player</div>
+          <div class="badge">You</div>
+        </div>
+        <div class="board-wrapper">
+          <canvas id="hold-player" width="120" height="120"></canvas>
+          <canvas id="board-player" width="240" height="480"></canvas>
+          <canvas id="next-player" width="140" height="480"></canvas>
+        </div>
+      </div>
+      <div class="board-card">
+        <div class="board-header">
+          <div>Bot</div>
+          <div class="badge">coldclear2</div>
+        </div>
+        <div class="board-wrapper">
+          <canvas id="hold-bot" width="120" height="120"></canvas>
+          <canvas id="board-bot" width="240" height="480"></canvas>
+          <canvas id="next-bot" width="140" height="480"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <section class="lobby">
+      <div class="panel">
+        <h3>Lobby</h3>
+        <div class="settings-grid">
+          <div class="field">
+            <label for="randPlayer">Player randomizer</label>
+            <select id="randPlayer">
+              <option value="SevenBag">7 bag</option>
+              <option value="TrueRandom">True random</option>
+              <option value="LoveTris">LoveTris+7 bag</option>
+              <option value="SinglePiece">Single piece</option>
+            </select>
+            <select id="randPlayerPiece" class="muted">
+              <option value="I">I</option>
+              <option value="J">J</option>
+              <option value="L">L</option>
+              <option value="O">O</option>
+              <option value="S">S</option>
+              <option value="Z">Z</option>
+              <option value="T">T</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="randBot">Bot randomizer</label>
+            <select id="randBot">
+              <option value="SevenBag">7 bag</option>
+              <option value="TrueRandom">True random</option>
+              <option value="LoveTris">LoveTris</option>
+              <option value="SinglePiece">Single piece</option>
+            </select>
+            <select id="randBotPiece" class="muted">
+              <option value="I">I</option>
+              <option value="J">J</option>
+              <option value="L">L</option>
+              <option value="O">O</option>
+              <option value="S">S</option>
+              <option value="Z">Z</option>
+              <option value="T">T</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="pps">Bot PPS</label>
+            <input type="range" id="pps" min="0.4" max="6" step="0.1" value="1.8">
+            <small class="muted" id="ppsValue">1.8 PPS</small>
+          </div>
+          <div class="field">
+            <label for="previewCount">Preview count</label>
+            <input type="range" id="previewCount" min="1" max="8" step="1" value="6">
+            <small class="muted" id="previewValue">6</small>
+          </div>
+        </div>
+        <button id="applySettings">Apply + Restart</button>
+        <div style="margin-top:10px;">
+          <button id="toggleSettings" class="accordion">Settings & Controls</button>
+        </div>
+      </div>
+
+      <div class="panel accordion-content" id="settingsPanel">
+        <h3>Game settings</h3>
+        <small>Persisted to localStorage</small>
+        <div class="settings-grid">
+          <div class="field">
+            <label for="das">DAS (ms)</label>
+            <input type="number" id="das" value="133" min="0">
+          </div>
+          <div class="field">
+            <label for="arr">ARR (ms)</label>
+            <input type="number" id="arr" value="10" min="0">
+          </div>
+          <div class="field">
+            <label for="softDrop">Soft drop</label>
+            <select id="softDrop">
+              <option value="Slow">Slow</option>
+              <option value="Medium" selected>Medium</option>
+              <option value="Fast">Fast</option>
+              <option value="Ultra">Ultra</option>
+              <option value="Instant">Instant</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="gridStyle">Grid</label>
+            <select id="gridStyle">
+              <option value="None">None</option>
+              <option value="Standard" selected>Standard</option>
+              <option value="Partial">Partial</option>
+              <option value="Vertical">Vertical</option>
+              <option value="Full">Full</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="ghostToggle">Ghost piece</label>
+            <select id="ghostToggle">
+              <option value="true" selected>Enabled</option>
+              <option value="false">Disabled</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel accordion-content" id="controlsPanel">
+        <h3>Game controls</h3>
+        <small>Click a key to remap. Settings persist.</small>
+        <div class="controls" id="controls"></div>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="./main.js"></script>
+</body>
+</html>

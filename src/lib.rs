@@ -1,0 +1,1368 @@
+use rand::seq::SliceRandom;
+use rand::thread_rng;
+use serde::{Deserialize, Serialize};
+use serde_wasm_bindgen::{from_value, to_value};
+use wasm_bindgen::prelude::*;
+use web_sys::console;
+
+const WIDTH: usize = 10;
+const VISIBLE_HEIGHT: usize = 20; // Jstris-style visible field
+const BUFFER_HEIGHT: usize = 1; // single-row, non-colliding buffer
+const TOTAL_HEIGHT: usize = VISIBLE_HEIGHT + BUFFER_HEIGHT;
+const LOCK_DELAY_MS: f32 = 500.0;
+
+#[wasm_bindgen(start)]
+pub fn bootstrap() {
+    console_error_panic_hook::set_once();
+}
+
+fn log(msg: &str) {
+    console::log_1(&JsValue::from_str(msg));
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub enum Tetromino {
+    I,
+    J,
+    L,
+    O,
+    S,
+    Z,
+    T,
+}
+
+impl Tetromino {
+    pub fn all() -> [Tetromino; 7] {
+        [
+            Tetromino::I,
+            Tetromino::J,
+            Tetromino::L,
+            Tetromino::O,
+            Tetromino::S,
+            Tetromino::Z,
+            Tetromino::T,
+        ]
+    }
+
+    fn color_id(self) -> u8 {
+        match self {
+            Tetromino::I => 1,
+            Tetromino::J => 2,
+            Tetromino::L => 3,
+            Tetromino::O => 4,
+            Tetromino::S => 5,
+            Tetromino::Z => 6,
+            Tetromino::T => 7,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub enum Rotation {
+    Spawn = 0,
+    Right = 1,
+    Reverse = 2,
+    Left = 3,
+}
+
+impl Rotation {
+    fn rotate_cw(self) -> Rotation {
+        match self {
+            Rotation::Spawn => Rotation::Right,
+            Rotation::Right => Rotation::Reverse,
+            Rotation::Reverse => Rotation::Left,
+            Rotation::Left => Rotation::Spawn,
+        }
+    }
+
+    fn rotate_ccw(self) -> Rotation {
+        match self {
+            Rotation::Spawn => Rotation::Left,
+            Rotation::Left => Rotation::Reverse,
+            Rotation::Reverse => Rotation::Right,
+            Rotation::Right => Rotation::Spawn,
+        }
+    }
+
+    fn rotate_180(self) -> Rotation {
+        match self {
+            Rotation::Spawn => Rotation::Reverse,
+            Rotation::Reverse => Rotation::Spawn,
+            Rotation::Right => Rotation::Left,
+            Rotation::Left => Rotation::Right,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct Point {
+    pub x: i8,
+    pub y: i8,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct GameSettings {
+    pub das: u32,
+    pub arr: u32,
+    pub soft_drop: SoftDropSpeed,
+    pub ghost_enabled: bool,
+    pub grid: GridStyle,
+}
+
+impl Default for GameSettings {
+    fn default() -> Self {
+        Self {
+            das: 133,
+            arr: 10,
+            soft_drop: SoftDropSpeed::Medium,
+            ghost_enabled: true,
+            grid: GridStyle::Standard,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize, Debug)]
+pub enum SoftDropSpeed {
+    Slow,
+    Medium,
+    Fast,
+    Ultra,
+    Instant,
+}
+
+impl SoftDropSpeed {
+    fn factor(self) -> f32 {
+        match self {
+            SoftDropSpeed::Slow => 1.2,
+            SoftDropSpeed::Medium => 2.0,
+            SoftDropSpeed::Fast => 5.0,
+            SoftDropSpeed::Ultra => 20.0,
+            SoftDropSpeed::Instant => 999.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize, Debug)]
+pub enum GridStyle {
+    None,
+    Standard,
+    Partial,
+    Vertical,
+    Full,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub enum RandomizerKind {
+    TrueRandom,
+    SevenBag,
+    SinglePiece { piece: Tetromino },
+    LoveTris,
+}
+
+impl Default for RandomizerKind {
+    fn default() -> Self {
+        RandomizerKind::SevenBag
+    }
+}
+
+trait Randomizer {
+    fn next(&mut self, board: &Board) -> Tetromino;
+}
+
+struct TrueRandom;
+
+impl Randomizer for TrueRandom {
+    fn next(&mut self, _board: &Board) -> Tetromino {
+        let mut rng = thread_rng();
+        *Tetromino::all().choose(&mut rng).unwrap()
+    }
+}
+
+struct SinglePiece {
+    piece: Tetromino,
+}
+
+impl Randomizer for SinglePiece {
+    fn next(&mut self, _board: &Board) -> Tetromino {
+        self.piece
+    }
+}
+
+struct SevenBag {
+    bag: Vec<Tetromino>,
+}
+
+impl SevenBag {
+    fn new() -> Self {
+        Self { bag: Vec::new() }
+    }
+
+    fn refill(&mut self) {
+        self.bag = Tetromino::all().to_vec();
+        self.bag.shuffle(&mut thread_rng());
+    }
+}
+
+impl Randomizer for SevenBag {
+    fn next(&mut self, _board: &Board) -> Tetromino {
+        if self.bag.is_empty() {
+            self.refill();
+        }
+        self.bag.pop().unwrap()
+    }
+}
+
+struct LoveTris {
+    bag: SevenBag,
+}
+
+impl LoveTris {
+    fn new() -> Self {
+        Self {
+            bag: SevenBag::new(),
+        }
+    }
+
+    fn score_candidate(board: &Board, piece: Tetromino) -> i32 {
+        let mut best = i32::MIN;
+        for rot in [
+            Rotation::Spawn,
+            Rotation::Right,
+            Rotation::Reverse,
+            Rotation::Left,
+        ] {
+            let shape = shape_blocks(piece, rot);
+            for x in -2..WIDTH as i32 + 2 {
+                if let Some(h) = board.lowest_drop_height(x, &shape) {
+                    let mut simulated = board.clone();
+                    simulated.lock_piece(x, h, &shape, piece.color_id());
+                    let lines = simulated.clear_lines();
+                    let holes = simulated.hole_count();
+                    let height_penalty = simulated.max_height() as i32 * 2;
+                    let score = (lines as i32 * 40) - (holes as i32 * 8) - height_penalty;
+                    if score > best {
+                        best = score;
+                    }
+                }
+            }
+        }
+        best
+    }
+}
+
+impl Randomizer for LoveTris {
+    fn next(&mut self, board: &Board) -> Tetromino {
+        if self.bag.bag.is_empty() {
+            self.bag.refill();
+        }
+        let mut best_index = 0;
+        let mut best_score = i32::MIN;
+        for (idx, piece) in self.bag.bag.iter().enumerate() {
+            let score = Self::score_candidate(board, *piece);
+            if score > best_score {
+                best_index = idx;
+                best_score = score;
+            }
+        }
+        self.bag.bag.remove(best_index)
+    }
+}
+
+fn randomizer_from_kind(kind: RandomizerKind) -> Box<dyn Randomizer> {
+    match kind {
+        RandomizerKind::TrueRandom => Box::new(TrueRandom),
+        RandomizerKind::SevenBag => Box::new(SevenBag::new()),
+        RandomizerKind::SinglePiece { piece } => Box::new(SinglePiece { piece }),
+        RandomizerKind::LoveTris => Box::new(LoveTris::new()),
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct InputState {
+    pub left: bool,
+    pub right: bool,
+    pub soft_drop: bool,
+    pub hard_drop: bool,
+    pub rotate_ccw: bool,
+    pub rotate_cw: bool,
+    pub rotate_180: bool,
+    pub hold: bool,
+}
+
+impl Default for InputState {
+    fn default() -> Self {
+        Self {
+            left: false,
+            right: false,
+            soft_drop: false,
+            hard_drop: false,
+            rotate_ccw: false,
+            rotate_cw: false,
+            rotate_180: false,
+            hold: false,
+        }
+    }
+}
+
+fn rotate_point(p: Point, rot: Rotation) -> Point {
+    match rot {
+        Rotation::Spawn => p,
+        Rotation::Right => Point { x: p.y, y: -p.x },
+        Rotation::Reverse => Point { x: -p.x, y: -p.y },
+        Rotation::Left => Point { x: -p.y, y: p.x },
+    }
+}
+
+fn shape_blocks(piece: Tetromino, rotation: Rotation) -> [Point; 4] {
+    // Base spawn shapes per Guideline SRS (y up).
+    let base = match piece {
+        Tetromino::I => [
+            Point { x: -1, y: 0 },
+            Point { x: 0, y: 0 },
+            Point { x: 1, y: 0 },
+            Point { x: 2, y: 0 },
+        ],
+        Tetromino::O => [
+            Point { x: 0, y: 0 },
+            Point { x: 1, y: 0 },
+            Point { x: 0, y: 1 },
+            Point { x: 1, y: 1 },
+        ],
+        Tetromino::T => [
+            Point { x: -1, y: 0 },
+            Point { x: 0, y: 0 },
+            Point { x: 1, y: 0 },
+            Point { x: 0, y: 1 },
+        ],
+        Tetromino::J => [
+            Point { x: -1, y: 0 },
+            Point { x: 0, y: 0 },
+            Point { x: 1, y: 0 },
+            Point { x: -1, y: 1 },
+        ],
+        Tetromino::L => [
+            Point { x: -1, y: 0 },
+            Point { x: 0, y: 0 },
+            Point { x: 1, y: 0 },
+            Point { x: 1, y: 1 },
+        ],
+        Tetromino::S => [
+            Point { x: -1, y: 0 },
+            Point { x: 0, y: 0 },
+            Point { x: 0, y: 1 },
+            Point { x: 1, y: 1 },
+        ],
+        Tetromino::Z => [
+            Point { x: -1, y: 1 },
+            Point { x: 0, y: 1 },
+            Point { x: 0, y: 0 },
+            Point { x: 1, y: 0 },
+        ],
+    };
+    let mut rotated = [Point { x: 0, y: 0 }; 4];
+    for (i, p) in base.iter().enumerate() {
+        rotated[i] = rotate_point(*p, rotation);
+    }
+    rotated
+}
+
+fn spawn_blocks(piece: Tetromino) -> [Point; 4] {
+    shape_blocks(piece, Rotation::Spawn)
+}
+
+#[derive(Clone)]
+struct ActivePiece {
+    piece: Tetromino,
+    rotation: Rotation,
+    x: i32,
+    y: i32,
+    lock_timer: f32,
+    move_resets: u8,
+}
+
+impl ActivePiece {
+    fn new(piece: Tetromino) -> Self {
+        Self {
+            piece,
+            rotation: Rotation::Spawn,
+            x: 4,
+            // Spawn so the lowest cells are visible; buffer row above is non-colliding.
+            y: (VISIBLE_HEIGHT as i32) - 1,
+            lock_timer: LOCK_DELAY_MS,
+            move_resets: 15,
+        }
+    }
+
+    fn blocks(&self) -> [Point; 4] {
+        shape_blocks(self.piece, self.rotation)
+    }
+}
+
+#[derive(Clone)]
+struct Board {
+    cells: [[u8; WIDTH]; TOTAL_HEIGHT],
+}
+
+impl Board {
+    fn new() -> Self {
+        Self {
+            cells: [[0; WIDTH]; TOTAL_HEIGHT],
+        }
+    }
+
+    fn is_occupied(&self, x: i32, y: i32) -> bool {
+        if x < 0 || x >= WIDTH as i32 {
+            return true;
+        }
+        if y < 0 {
+            return true;
+        }
+        if y >= TOTAL_HEIGHT as i32 {
+            return true;
+        }
+        // Buffer rows are non-colliding.
+        if y >= VISIBLE_HEIGHT as i32 {
+            return false;
+        }
+        self.cells[y as usize][x as usize] != 0
+    }
+
+    fn collision(&self, ap: &ActivePiece) -> bool {
+        for b in ap.blocks() {
+            let x = ap.x + b.x as i32;
+            let y = ap.y + b.y as i32;
+            if self.is_occupied(x, y) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn lock_piece(&mut self, x: i32, y: i32, blocks: &[Point; 4], color: u8) {
+        for b in blocks {
+            let px = x + b.x as i32;
+            let py = y + b.y as i32;
+            if px >= 0 && px < WIDTH as i32 && py >= 0 && py < TOTAL_HEIGHT as i32 {
+                self.cells[py as usize][px as usize] = color;
+            }
+        }
+    }
+
+    fn clear_lines(&mut self) -> usize {
+        let mut cleared = 0;
+        let mut y = 0;
+        while y < VISIBLE_HEIGHT {
+            if self.cells[y].iter().all(|&c| c != 0) {
+                cleared += 1;
+                // move everything above this line down by one
+                for pull in (y + 1)..TOTAL_HEIGHT {
+                    self.cells[pull - 1] = self.cells[pull];
+                }
+                self.cells[TOTAL_HEIGHT - 1] = [0; WIDTH]; // top becomes empty (buffer row cleared too)
+                // do not increment y to recheck the same row after pull-down
+            } else {
+                y += 1;
+            }
+        }
+        cleared
+    }
+
+    fn hole_count(&self) -> usize {
+        let mut holes = 0;
+        for x in 0..WIDTH {
+            let mut found = false;
+            for y in (0..TOTAL_HEIGHT).rev() {
+                if self.cells[y][x] != 0 {
+                    found = true;
+                } else if found {
+                    holes += 1;
+                }
+            }
+        }
+        holes
+    }
+
+    fn max_height(&self) -> usize {
+        for y in (0..TOTAL_HEIGHT).rev() {
+            if self.cells[y].iter().any(|&c| c != 0) {
+                return y + 1;
+            }
+        }
+        0
+    }
+
+    fn lowest_drop_height(&self, x: i32, blocks: &[Point; 4]) -> Option<i32> {
+        let mut y = TOTAL_HEIGHT as i32 - 1;
+        while y >= 0 {
+            if blocks.iter().all(|b| {
+                let px = x + b.x as i32;
+                let py = y + b.y as i32;
+                px >= 0 && px < WIDTH as i32 && py >= 0 && py < TOTAL_HEIGHT as i32
+            }) && !blocks.iter().any(|b| {
+                let px = x + b.x as i32;
+                let py = y + b.y as i32;
+                // allow in buffer
+                self.is_occupied(px, py)
+            }) {
+                return Some(y);
+            }
+            y -= 1;
+        }
+        None
+    }
+}
+
+#[derive(Default)]
+struct KickTable;
+
+impl KickTable {
+    fn kicks(piece: Tetromino, from: Rotation, to: Rotation) -> Vec<(i32, i32)> {
+        let idx = match (from, to) {
+            (Rotation::Spawn, Rotation::Right) => 0,
+            (Rotation::Right, Rotation::Spawn) => 1,
+            (Rotation::Right, Rotation::Reverse) => 2,
+            (Rotation::Reverse, Rotation::Right) => 3,
+            (Rotation::Reverse, Rotation::Left) => 4,
+            (Rotation::Left, Rotation::Reverse) => 5,
+            (Rotation::Left, Rotation::Spawn) => 6,
+            (Rotation::Spawn, Rotation::Left) => 7,
+            _ => 0,
+        };
+        // From Guideline SRS tables (JLSTZ) and I, O.
+        const JLSTZ: [[(i32, i32); 5]; 8] = [
+            [(0, 0), (-1, 0), (-1, 1), (0, -2), (-1, -2)], // 0->R
+            [(0, 0), (1, 0), (1, -1), (0, 2), (1, 2)],    // R->0
+            [(0, 0), (1, 0), (1, -1), (0, 2), (1, 2)],    // R->2
+            [(0, 0), (-1, 0), (-1, 1), (0, -2), (-1, -2)],// 2->R
+            [(0, 0), (1, 0), (1, 1), (0, -2), (1, -2)],   // 2->L
+            [(0, 0), (-1, 0), (-1, -1), (0, 2), (-1, 2)], // L->2
+            [(0, 0), (-1, 0), (-1, -1), (0, 2), (-1, 2)], // L->0
+            [(0, 0), (1, 0), (1, 1), (0, -2), (1, -2)],   // 0->L
+        ];
+        const I: [[(i32, i32); 5]; 8] = [
+            [(0, 0), (-2, 0), (1, 0), (-2, -1), (1, 2)], // 0->R
+            [(0, 0), (2, 0), (-1, 0), (2, 1), (-1, -2)], // R->0
+            [(0, 0), (1, 0), (2, 0), (1, -2), (2, -1)],  // R->2
+            [(0, 0), (-1, 0), (-2, 0), (-1, 2), (-2, 1)],// 2->R
+            [(0, 0), (2, 0), (-1, 0), (2, 1), (-1, -2)], // 2->L
+            [(0, 0), (-2, 0), (1, 0), (-2, -1), (1, 2)], // L->2
+            [(0, 0), (1, 0), (2, 0), (1, -2), (2, -1)],  // L->0
+            [(0, 0), (-1, 0), (-2, 0), (-1, 2), (-2, 1)],// 0->L
+        ];
+        match piece {
+            Tetromino::I => I[idx].to_vec(),
+            Tetromino::O => vec![(0, 0)],
+            _ => JLSTZ[idx].to_vec(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct PlayerView {
+    pub field: Vec<u8>,
+    pub active: Vec<Point>,
+    pub active_color: u8,
+    pub ghost: Vec<Point>,
+    pub hold: Option<u8>,
+    pub hold_blocks: Option<Vec<Point>>,
+    pub hold_color_id: Option<u8>,
+    pub next: Vec<u8>,
+    pub next_blocks: Vec<Vec<Point>>,
+    pub topped_out: bool,
+}
+
+#[derive(Serialize)]
+pub struct FrameView {
+    pub players: Vec<PlayerView>,
+    pub settings: GameSettings,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct BotPlan {
+    pub piece: u8,
+    pub x: i32,
+    pub rotation: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct ControlBindings {
+    pub move_left: String,
+    pub move_right: String,
+    pub soft_drop: String,
+    pub hard_drop: String,
+    pub rotate_ccw: String,
+    pub rotate_cw: String,
+    pub rotate_180: String,
+    pub hold: String,
+}
+
+impl Default for ControlBindings {
+    fn default() -> Self {
+        Self {
+            move_left: "ArrowLeft".to_string(),
+            move_right: "ArrowRight".to_string(),
+            soft_drop: "ArrowDown".to_string(),
+            hard_drop: "Space".to_string(),
+            rotate_ccw: "KeyZ".to_string(),
+            rotate_cw: "ArrowUp".to_string(),
+            rotate_180: "KeyA".to_string(),
+            hold: "KeyC".to_string(),
+        }
+    }
+}
+
+struct Player {
+    board: Board,
+    active: ActivePiece,
+    queue: Vec<Tetromino>,
+    hold: Option<Tetromino>,
+    held_on_turn: bool,
+    randomizer: Box<dyn Randomizer>,
+    topped_out: bool,
+}
+
+impl Player {
+    fn new(randomizer_kind: RandomizerKind) -> Self {
+        let mut randomizer = randomizer_from_kind(randomizer_kind.clone());
+        let mut queue = Vec::new();
+        for _ in 0..6 {
+            queue.push(randomizer.next(&Board::new()));
+        }
+        let first = queue.remove(0);
+        Self {
+            board: Board::new(),
+            active: ActivePiece::new(first),
+            queue,
+            hold: None,
+            held_on_turn: false,
+            randomizer,
+            topped_out: false,
+        }
+    }
+
+    fn set_randomizer(&mut self, kind: RandomizerKind) {
+        self.randomizer = randomizer_from_kind(kind);
+        self.queue.clear();
+        self.refill_queue();
+        self.hold = None;
+        self.spawn_next();
+    }
+
+    fn refill_queue(&mut self) {
+        while self.queue.len() < 6 {
+            let piece = self.randomizer.next(&self.board);
+            self.queue.push(piece);
+        }
+    }
+
+    fn spawn_next(&mut self) {
+        self.held_on_turn = false;
+        self.refill_queue();
+        let next_piece = self.queue.remove(0);
+        self.active = ActivePiece::new(next_piece);
+        if self.board.collision(&self.active) {
+            self.topped_out = true;
+            log("Top out on spawn");
+        }
+    }
+
+    fn hard_drop(&mut self) -> usize {
+        let mut landing_y = self.active.y;
+        loop {
+            let test = ActivePiece {
+                y: landing_y - 1,
+                ..self.active.clone()
+            };
+            if self.board.collision(&test) {
+                break;
+            } else {
+                landing_y -= 1;
+            }
+            if landing_y < 0 {
+                break;
+            }
+        }
+        self.active.y = landing_y;
+        self.lock_piece()
+    }
+
+    fn lock_piece(&mut self) -> usize {
+        let color = self.active.piece.color_id();
+        let blocks = self.active.blocks();
+        self.board
+            .lock_piece(self.active.x, self.active.y, &blocks, color);
+        let cleared = self.board.clear_lines();
+        log(&format!(
+            "Locked {:?} at ({}, {}) cleared {}",
+            self.active.piece, self.active.x, self.active.y, cleared
+        ));
+        self.spawn_next();
+        cleared
+    }
+}
+
+impl Versus {
+    fn apply_plan(&mut self, plan: BotPlan) {
+        // Only apply if current piece matches
+        let active_piece = self.players[1].active.piece.color_id();
+        if active_piece != plan.piece {
+            self.bot_plan = Some(plan);
+            return;
+        }
+        let rot = match plan.rotation.as_str() {
+            "north" | "spawn" | "Spawn" => Rotation::Spawn,
+            "east" | "right" | "Right" => Rotation::Right,
+            "south" | "reverse" | "Reverse" => Rotation::Reverse,
+            "west" | "left" | "Left" => Rotation::Left,
+            _ => Rotation::Spawn,
+        };
+        self.players[1].active.rotation = rot;
+        self.players[1].active.x = plan.x;
+        // Drop to lowest valid height and lock.
+        let blocks = self.players[1].active.blocks();
+        if let Some(y) = self.players[1].board.lowest_drop_height(plan.x, &blocks) {
+            self.players[1].active.y = y;
+            self.players[1].lock_piece();
+            self.fall_accum[1] = 0.0;
+        } else {
+            // If invalid, leave plan pending.
+            self.bot_plan = Some(plan);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub struct InputFrame {
+    pub left: bool,
+    pub right: bool,
+    pub soft_drop: bool,
+    pub hard_drop: bool,
+    pub rotate_ccw: bool,
+    pub rotate_cw: bool,
+    pub rotate_180: bool,
+    pub hold: bool,
+}
+
+impl From<InputState> for InputFrame {
+    fn from(value: InputState) -> Self {
+        Self {
+            left: value.left,
+            right: value.right,
+            soft_drop: value.soft_drop,
+            hard_drop: value.hard_drop,
+            rotate_ccw: value.rotate_ccw,
+            rotate_cw: value.rotate_cw,
+            rotate_180: value.rotate_180,
+            hold: value.hold,
+        }
+    }
+}
+
+struct Controller {
+    inputs: InputState,
+    last_hard_drop: bool,
+    last_dir: i32,
+    das_timer: f32,
+    arr_timer: f32,
+    shifted_initial: bool,
+    last_rotate_cw: bool,
+    last_rotate_ccw: bool,
+    last_rotate_180: bool,
+}
+
+impl Controller {
+    fn new() -> Self {
+        Self {
+            inputs: InputState::default(),
+            last_hard_drop: false,
+            last_dir: 0,
+            das_timer: 0.0,
+            arr_timer: 0.0,
+            shifted_initial: false,
+            last_rotate_cw: false,
+            last_rotate_ccw: false,
+            last_rotate_180: false,
+        }
+    }
+
+    fn update_inputs(&mut self, incoming: InputFrame) {
+        self.inputs.left = incoming.left;
+        self.inputs.right = incoming.right;
+        self.inputs.soft_drop = incoming.soft_drop;
+        self.inputs.hard_drop = incoming.hard_drop;
+        self.inputs.rotate_ccw = incoming.rotate_ccw;
+        self.inputs.rotate_cw = incoming.rotate_cw;
+        self.inputs.rotate_180 = incoming.rotate_180;
+        self.inputs.hold = incoming.hold;
+    }
+
+    fn take_hard_drop(&mut self) -> bool {
+        let fire = self.inputs.hard_drop && !self.last_hard_drop;
+        self.last_hard_drop = self.inputs.hard_drop;
+        fire
+    }
+
+    fn take_rotate_cw(&mut self) -> bool {
+        let fire = self.inputs.rotate_cw && !self.last_rotate_cw;
+        self.last_rotate_cw = self.inputs.rotate_cw;
+        fire
+    }
+
+    fn take_rotate_ccw(&mut self) -> bool {
+        let fire = self.inputs.rotate_ccw && !self.last_rotate_ccw;
+        self.last_rotate_ccw = self.inputs.rotate_ccw;
+        fire
+    }
+
+    fn take_rotate_180(&mut self) -> bool {
+        let fire = self.inputs.rotate_180 && !self.last_rotate_180;
+        self.last_rotate_180 = self.inputs.rotate_180;
+        fire
+    }
+}
+
+struct BotConfig {
+    pps: f32,
+}
+
+impl Default for BotConfig {
+    fn default() -> Self {
+        Self { pps: 1.8 }
+    }
+}
+
+struct BotDriver {
+    config: BotConfig,
+    think_timer: f32,
+}
+
+impl BotDriver {
+    fn new(config: BotConfig) -> Self {
+        Self {
+            config,
+            think_timer: 0.0,
+        }
+    }
+
+    fn update(&mut self, player: &mut Player, dt_ms: f32) -> InputFrame {
+        let mut frame = InputFrame {
+            left: false,
+            right: false,
+            soft_drop: false,
+            hard_drop: false,
+            rotate_ccw: false,
+            rotate_cw: false,
+            rotate_180: false,
+            hold: false,
+        };
+        self.think_timer += dt_ms;
+        let piece_time = 1000.0 / self.config.pps.max(0.1);
+        if self.think_timer >= piece_time {
+            self.think_timer = 0.0;
+            let best = find_safe_column(&player.board, player.active.piece);
+            if let Some(plan) = best {
+                frame = plan;
+            } else {
+                frame.hard_drop = true;
+            }
+        }
+        frame
+    }
+}
+
+fn find_safe_column(board: &Board, piece: Tetromino) -> Option<InputFrame> {
+    let mut rng = thread_rng();
+    let mut columns: Vec<i32> = (0..WIDTH as i32).collect();
+    columns.shuffle(&mut rng);
+
+    let mut best_col: Option<i32> = None;
+    let mut best_height = usize::MAX;
+    for col in columns {
+        let height = (0..TOTAL_HEIGHT)
+            .rev()
+            .find(|&y| board.cells[y][col as usize] != 0)
+            .map(|y| y + 1)
+            .unwrap_or(0);
+        if height < best_height {
+            best_height = height;
+            best_col = Some(col);
+        }
+    }
+
+    if let Some(col) = best_col {
+        let mut frame = InputFrame {
+            left: false,
+            right: false,
+            soft_drop: false,
+            hard_drop: true,
+            rotate_ccw: false,
+            rotate_cw: false,
+            rotate_180: false,
+            hold: false,
+        };
+        if col < 4 {
+            frame.left = true;
+        } else if col > 4 {
+            frame.right = true;
+        }
+        if piece == Tetromino::I && best_height + 4 > VISIBLE_HEIGHT + BUFFER_HEIGHT - 2 {
+            frame.rotate_cw = true;
+        }
+        return Some(frame);
+    }
+    None
+}
+
+struct Versus {
+    players: [Player; 2],
+    controllers: [Controller; 2],
+    settings: GameSettings,
+    bot_driver: BotDriver,
+    fall_accum: [f32; 2],
+    gravity_ms: f32,
+    bot_plan: Option<BotPlan>,
+}
+
+impl Versus {
+    fn new(settings: GameSettings, bot_config: BotConfig, randomizers: [RandomizerKind; 2]) -> Self {
+        Self {
+            players: [
+                Player::new(randomizers[0].clone()),
+                Player::new(randomizers[1].clone()),
+            ],
+            controllers: [Controller::new(), Controller::new()],
+            settings,
+            bot_driver: BotDriver::new(bot_config),
+            fall_accum: [0.0, 0.0],
+            gravity_ms: 1000.0,
+            bot_plan: None,
+        }
+    }
+
+    fn tick(&mut self, dt_ms: f32, input0: InputFrame) {
+        self.controllers[0].update_inputs(input0);
+        if let Some(plan) = self.bot_plan.take() {
+            self.apply_plan(plan);
+        } else {
+            let bot_input = self.bot_driver.update(&mut self.players[1], dt_ms);
+            self.controllers[1].update_inputs(bot_input);
+        }
+
+        for idx in 0..2 {
+            let is_bot = idx == 1;
+            let inputs = self.controllers[idx].inputs.clone();
+            self.advance_player(idx, dt_ms, inputs, is_bot);
+        }
+    }
+
+    fn advance_player(&mut self, idx: usize, dt_ms: f32, inputs: InputState, _is_bot: bool) {
+        if self.players[idx].topped_out {
+            return;
+        }
+        let (mut moved, mut rotated) = (false, false);
+        if self.controllers[idx].take_hard_drop() {
+            self.players[idx].hard_drop();
+            self.fall_accum[idx] = 0.0;
+            return;
+        }
+        if self.controllers[idx].take_rotate_cw() {
+            rotated |= self.try_rotate(idx, true, false);
+        }
+        if self.controllers[idx].take_rotate_ccw() {
+            rotated |= self.try_rotate(idx, false, false);
+        }
+        if self.controllers[idx].take_rotate_180() {
+            rotated |= self.try_rotate(idx, true, true);
+        }
+        let dir = match (inputs.left, inputs.right) {
+            (true, false) => -1,
+            (false, true) => 1,
+            _ => 0,
+        };
+        {
+            let ctrl = &mut self.controllers[idx];
+            if dir != ctrl.last_dir {
+                ctrl.das_timer = 0.0;
+                ctrl.arr_timer = 0.0;
+                ctrl.shifted_initial = false;
+                ctrl.last_dir = dir;
+            }
+        }
+        let mut das_timer = self.controllers[idx].das_timer;
+        let mut arr_timer = self.controllers[idx].arr_timer;
+        let mut shifted_initial = self.controllers[idx].shifted_initial;
+        if dir != 0 {
+            if !shifted_initial {
+                moved |= self.try_shift(idx, dir);
+                shifted_initial = true;
+            }
+            das_timer += dt_ms;
+            if das_timer >= self.settings.das as f32 {
+                arr_timer += dt_ms;
+                let step = self.settings.arr.max(1) as f32;
+                while arr_timer >= step {
+                    if !self.try_shift(idx, dir) {
+                        break;
+                    }
+                    moved = true;
+                    arr_timer -= step;
+                }
+            }
+        } else {
+            das_timer = 0.0;
+            arr_timer = 0.0;
+            shifted_initial = false;
+        }
+        self.controllers[idx].das_timer = das_timer;
+        self.controllers[idx].arr_timer = arr_timer;
+        self.controllers[idx].shifted_initial = shifted_initial;
+
+        if inputs.hold {
+            self.try_hold(idx);
+        }
+
+        // Gravity / soft drop
+        let drop_speed = if inputs.soft_drop {
+            self.settings.soft_drop.factor()
+        } else {
+            1.0
+        };
+        self.fall_accum[idx] += dt_ms * drop_speed;
+        while self.fall_accum[idx] >= self.gravity_ms {
+            if !self.try_fall(idx) {
+                break;
+            }
+            self.fall_accum[idx] -= self.gravity_ms;
+        }
+
+        let on_ground = {
+            let test = ActivePiece {
+                y: self.players[idx].active.y - 1,
+                ..self.players[idx].active.clone()
+            };
+            self.players[idx].board.collision(&test)
+        };
+
+        let piece = &mut self.players[idx].active;
+        if rotated || moved {
+            if on_ground && piece.move_resets > 0 {
+                piece.lock_timer = LOCK_DELAY_MS;
+                piece.move_resets -= 1;
+            }
+        }
+
+        if on_ground {
+            piece.lock_timer -= dt_ms;
+            if piece.lock_timer <= 0.0 {
+                self.players[idx].lock_piece();
+                self.fall_accum[idx] = 0.0;
+            }
+        } else {
+            piece.lock_timer = LOCK_DELAY_MS;
+            piece.move_resets = 15;
+        }
+    }
+
+    fn try_fall(&mut self, idx: usize) -> bool {
+        let test = ActivePiece {
+            y: self.players[idx].active.y - 1,
+            ..self.players[idx].active.clone()
+        };
+        if self.players[idx].board.collision(&test) {
+            return false;
+        }
+        self.players[idx].active = test;
+        true
+    }
+
+    fn try_shift(&mut self, idx: usize, dir: i32) -> bool {
+        let test = ActivePiece {
+            x: self.players[idx].active.x + dir,
+            ..self.players[idx].active.clone()
+        };
+        if self.players[idx].board.collision(&test) {
+            return false;
+        }
+        self.players[idx].active = test;
+        true
+    }
+
+    fn try_rotate(&mut self, idx: usize, cw: bool, double: bool) -> bool {
+        if double {
+            // Apply two sequential 90-degree rotations with kicks.
+            let first = self.try_rotate(idx, cw, false);
+            let second = self.try_rotate(idx, cw, false);
+            return first || second;
+        }
+        let from = self.players[idx].active.rotation;
+        let to = if cw { from.rotate_cw() } else { from.rotate_ccw() };
+        let kicks = KickTable::kicks(self.players[idx].active.piece, from, to);
+        for (dx, dy) in kicks {
+            let test = ActivePiece {
+                rotation: to,
+                x: self.players[idx].active.x + dx,
+                y: self.players[idx].active.y + dy,
+                ..self.players[idx].active.clone()
+            };
+            if !self.players[idx].board.collision(&test) {
+                self.players[idx].active = test;
+                return true;
+            }
+        }
+        false
+    }
+
+    fn try_hold(&mut self, idx: usize) {
+        if self.players[idx].held_on_turn {
+            return;
+        }
+        let current = self.players[idx].active.piece;
+        if let Some(held) = self.players[idx].hold {
+            self.players[idx].active = ActivePiece::new(held);
+            self.players[idx].hold = Some(current);
+        } else {
+            self.players[idx].hold = Some(current);
+            self.players[idx].spawn_next();
+        }
+        self.players[idx].held_on_turn = true;
+    }
+
+    fn ghost(&self, idx: usize) -> Vec<Point> {
+        let mut ghost = self.players[idx].active.clone();
+        // Drop straight down until collision.
+        loop {
+            let test = ActivePiece {
+                y: ghost.y - 1,
+                ..ghost.clone()
+            };
+            if self.players[idx].board.collision(&test) {
+                break;
+            }
+            ghost = test;
+            if ghost.y <= 0 {
+                break;
+            }
+        }
+        ghost
+            .blocks()
+            .iter()
+            .filter_map(|b| {
+                let gy = ghost.y + b.y as i32;
+                if (0..VISIBLE_HEIGHT as i32).contains(&gy) {
+                    Some(Point {
+                        x: ghost.x as i8 + b.x,
+                        y: gy as i8,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn snapshot(&self) -> FrameView {
+        let mut players = Vec::new();
+        for idx in 0..2 {
+            let mut field = Vec::with_capacity(WIDTH * VISIBLE_HEIGHT);
+            for y in 0..VISIBLE_HEIGHT {
+                for x in 0..WIDTH {
+                    field.push(self.players[idx].cells(y, x));
+                }
+            }
+            let active = self.players[idx]
+                .active
+                .blocks()
+                .iter()
+                .filter_map(|b| {
+                    let ay = self.players[idx].active.y + b.y as i32;
+                    if (0..VISIBLE_HEIGHT as i32).contains(&ay) {
+                        Some(Point {
+                            x: self.players[idx].active.x as i8 + b.x,
+                            y: ay as i8,
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            let ghost = if self.settings.ghost_enabled {
+                self.ghost(idx)
+            } else {
+                Vec::new()
+            };
+            let next = self.players[idx]
+                .queue
+                .iter()
+                .copied()
+                .map(|p| p.color_id())
+                .collect();
+            let next_blocks = self.players[idx]
+                .queue
+                .iter()
+                .map(|p| spawn_blocks(*p).to_vec())
+                .collect();
+            let hold_blocks = self.players[idx].hold.map(|p| spawn_blocks(p).to_vec());
+            players.push(PlayerView {
+                field,
+                active,
+                active_color: self.players[idx].active.piece.color_id(),
+                ghost,
+                hold: self.players[idx].hold.map(|p| p.color_id()),
+                hold_blocks,
+                hold_color_id: self.players[idx].hold.map(|p| p.color_id()),
+                next,
+                next_blocks,
+                topped_out: self.players[idx].topped_out,
+            });
+        }
+        FrameView {
+            players,
+            settings: self.settings.clone(),
+        }
+    }
+
+    fn set_randomizer(&mut self, player: usize, kind: RandomizerKind) {
+        if let Some(p) = self.players.get_mut(player) {
+            p.set_randomizer(kind);
+        }
+    }
+}
+
+impl Player {
+    fn cells(&self, row: usize, col: usize) -> u8 {
+        self.board.cells[row][col]
+    }
+}
+
+#[derive(Serialize)]
+pub struct TbpFrame {
+    pub board: Vec<u8>,
+    pub active: Vec<Point>,
+    pub hold: Option<u8>,
+    pub next: Vec<u8>,
+}
+
+fn tbp_frame_for(player: &Player) -> TbpFrame {
+    let mut board = Vec::with_capacity(WIDTH * TOTAL_HEIGHT);
+    for row in 0..TOTAL_HEIGHT {
+        for x in 0..WIDTH {
+            board.push(player.board.cells[row][x]);
+        }
+    }
+    TbpFrame {
+        board,
+        active: player.active.blocks().to_vec(),
+        hold: player.hold.map(|p| p.color_id()),
+        next: player.queue.iter().map(|p| p.color_id()).collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sort_points(mut pts: Vec<Point>) -> Vec<Point> {
+        pts.sort_by_key(|p| (p.x, p.y));
+        pts
+    }
+
+    #[test]
+    fn srs_shapes_match_reference() {
+        let expected = |piece, pts: &[(i8, i8)]| {
+            // Spawn orientation only; rotations derive from rotate_point.
+            assert_eq!(
+                sort_points(
+                    shape_blocks(piece, Rotation::Spawn)
+                        .iter()
+                        .map(|p| Point { x: p.x, y: p.y })
+                        .collect()
+                ),
+                sort_points(pts.iter().map(|(x, y)| Point { x: *x, y: *y }).collect())
+            );
+        };
+        expected(Tetromino::S, &[(-1, 0), (0, 0), (0, 1), (1, 1)]);
+        expected(Tetromino::Z, &[(-1, 1), (0, 1), (0, 0), (1, 0)]);
+    }
+
+    #[test]
+    fn srs_kicks_match_reference_jlstz_and_i() {
+        // JLSTZ 0->R: (0,0), (-1,0), (-1,1), (0,-2), (-1,-2)
+        let kicks_j = KickTable::kicks(Tetromino::J, Rotation::Spawn, Rotation::Right);
+        assert_eq!(kicks_j, vec![(0, 0), (-1, 0), (-1, 1), (0, -2), (-1, -2)]);
+        let kicks_j_back = KickTable::kicks(Tetromino::J, Rotation::Right, Rotation::Spawn);
+        assert_eq!(kicks_j_back, vec![(0, 0), (1, 0), (1, -1), (0, 2), (1, 2)]);
+
+        let kicks_i = KickTable::kicks(Tetromino::I, Rotation::Spawn, Rotation::Right);
+        assert_eq!(kicks_i, vec![(0, 0), (-2, 0), (1, 0), (-2, -1), (1, 2)]);
+        let kicks_i_back = KickTable::kicks(Tetromino::I, Rotation::Right, Rotation::Spawn);
+        assert_eq!(kicks_i_back, vec![(0, 0), (2, 0), (-1, 0), (2, 1), (-1, -2)]);
+    }
+}
+
+#[wasm_bindgen]
+pub struct GameClient {
+    versus: Versus,
+    input_state: InputState,
+}
+
+#[wasm_bindgen]
+impl GameClient {
+    #[wasm_bindgen(constructor)]
+    pub fn new(settings: JsValue, bot_pps: f32, randomizers: JsValue) -> Result<GameClient, JsValue> {
+        let settings: GameSettings = from_value(settings).unwrap_or_default();
+        let randomizers: [RandomizerKind; 2] = from_value(randomizers)
+            .unwrap_or([RandomizerKind::SevenBag, RandomizerKind::SevenBag]);
+        let versus = Versus::new(settings, BotConfig { pps: bot_pps }, randomizers);
+        Ok(Self {
+            versus,
+            input_state: InputState::default(),
+        })
+    }
+
+    #[wasm_bindgen(js_name = tick)]
+    pub fn tick(&mut self, dt_ms: f32) -> Result<JsValue, JsValue> {
+        let frame: InputFrame = self.input_state.clone().into();
+        self.versus.tick(dt_ms, frame);
+        to_value(&self.versus.snapshot()).map_err(|e| e.into())
+    }
+
+    #[wasm_bindgen(js_name = setInput)]
+    pub fn set_input(&mut self, input: JsValue) -> Result<(), JsValue> {
+        let parsed: InputFrame = from_value(input)?;
+        self.input_state = InputState {
+            left: parsed.left,
+            right: parsed.right,
+            soft_drop: parsed.soft_drop,
+            hard_drop: parsed.hard_drop,
+            rotate_ccw: parsed.rotate_ccw,
+            rotate_cw: parsed.rotate_cw,
+            rotate_180: parsed.rotate_180,
+            hold: parsed.hold,
+        };
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = setRandomizer)]
+    pub fn set_randomizer(&mut self, player: usize, kind: JsValue) -> Result<(), JsValue> {
+        let parsed: RandomizerKind = from_value(kind)?;
+        self.versus.set_randomizer(player, parsed);
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = tbpState)]
+    pub fn tbp_state(&self, player: usize) -> Result<JsValue, JsValue> {
+        let player = self
+            .versus
+            .players
+            .get(player)
+            .ok_or_else(|| JsValue::from_str("player out of range"))?;
+        to_value(&tbp_frame_for(player)).map_err(|e| e.into())
+    }
+
+    #[wasm_bindgen(js_name = setBotPlan)]
+    pub fn set_bot_plan(&mut self, plan: JsValue) -> Result<(), JsValue> {
+        let parsed: BotPlan = from_value(plan)?;
+        self.versus.bot_plan = Some(parsed);
+        Ok(())
+    }
+}
