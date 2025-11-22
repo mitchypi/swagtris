@@ -25,22 +25,50 @@
     <section class="boards">
       <div class="board-card">
         <div class="board-header">
-          <div>Player</div>
-          <div class="badge">You</div>
+          <div class="board-title">
+            <div>Player</div>
+            <div class="badge">You</div>
+          </div>
         </div>
         <div class="board-wrapper">
-          <canvas id="hold-player" width="120" height="120"></canvas>
+          <div class="side-column">
+            <canvas id="hold-player" width="120" height="120"></canvas>
+            <div class="stats-block" id="stats-player">
+              <div class="stat-row"><span>Time</span><strong id="player-time">0.0s</strong></div>
+              <div class="stat-row"><span>Attack</span><strong id="player-attack">—</strong></div>
+              <div class="stat-row"><span>Finesse</span><strong id="player-finesse">—</strong></div>
+              <div class="stat-row"><span>PPS</span><strong id="player-pps">0.00</strong></div>
+              <div class="stat-row"><span>KPP</span><strong id="player-kpp">0.00</strong></div>
+              <div class="stat-row"><span>Lines Sent</span><strong id="player-lines">0</strong></div>
+            </div>
+          </div>
           <canvas id="board-player" width="240" height="480"></canvas>
           <canvas id="next-player" width="140" height="480"></canvas>
         </div>
       </div>
       <div class="board-card">
         <div class="board-header">
-          <div>Bot</div>
-          <div class="badge">coldclear2</div>
+          <div class="board-title">
+            <div>Bot</div>
+            <div class="badge">coldclear2</div>
+          </div>
+          <div class="bot-status" id="botStatus">
+            <span class="status-dot disconnected" id="botStatusDot"></span>
+            <span class="muted" id="botStatusText">Disconnected</span>
+          </div>
         </div>
         <div class="board-wrapper">
-          <canvas id="hold-bot" width="120" height="120"></canvas>
+          <div class="side-column">
+            <canvas id="hold-bot" width="120" height="120"></canvas>
+            <div class="stats-block" id="stats-bot">
+              <div class="stat-row"><span>Time</span><strong id="bot-time">0.0s</strong></div>
+              <div class="stat-row"><span>Attack</span><strong id="bot-attack">—</strong></div>
+              <div class="stat-row"><span>Finesse</span><strong id="bot-finesse">—</strong></div>
+              <div class="stat-row"><span>PPS</span><strong id="bot-pps">0.00</strong></div>
+              <div class="stat-row"><span>KPP</span><strong id="bot-kpp">0.00</strong></div>
+              <div class="stat-row"><span>Lines Sent</span><strong id="bot-lines">0</strong></div>
+            </div>
+          </div>
           <canvas id="board-bot" width="240" height="480"></canvas>
           <canvas id="next-bot" width="140" height="480"></canvas>
         </div>

@@ -1,12 +1,23 @@
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+#[cfg(not(target_arch = "wasm32"))]
 use clap::Parser;
+#[cfg(not(target_arch = "wasm32"))]
 use futures::{SinkExt, StreamExt};
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::net::TcpListener;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::process::Command;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 /// Bridge between the browser and cold-clear-2 via TBP over stdin/stdout.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Parser, Debug, Clone)]
 struct Opts {
     /// Address to listen for websocket connections (browser connects here)
@@ -20,6 +31,7 @@ struct Opts {
     bot_config: Option<PathBuf>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let opts = Opts::parse();
@@ -38,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 async fn handle_conn(stream: tokio::net::TcpStream, opts: Opts) -> anyhow::Result<()> {
     let ws_stream = accept_async(stream).await?;
     let (mut ws_tx, mut ws_rx) = ws_stream.split();

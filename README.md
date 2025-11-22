@@ -1,7 +1,7 @@
 # Rust + WebAssembly Tetris (1v1 vs coldclear2)
 
 Features included:
-- Guideline playfield (10x20 visible + hidden buffer), SRS kicks, hold, ghost toggle, soft-drop presets.
+- Guideline playfield (10x20 visible + hidden 20 row buffer), SRS kicks, hold, ghost toggle, soft-drop presets.
 - Randomizers: true random, 7 bag, SinglePiece (selectable), and LoveTris (picks the best piece from the current bag).
 - Configurable bot PPS and randomizer; TBP snapshot helper for integrating ColdClear2 via the tetris-bot-protocol.
 - Persisted settings and key bindings stored in `localStorage`.

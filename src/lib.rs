@@ -1,5 +1,6 @@
 use rand::seq::SliceRandom;
 use rand::thread_rng;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_wasm_bindgen::{from_value, to_value};
 use wasm_bindgen::prelude::*;
@@ -7,7 +8,7 @@ use web_sys::console;
 
 const WIDTH: usize = 10;
 const VISIBLE_HEIGHT: usize = 20; // Jstris-style visible field
-const BUFFER_HEIGHT: usize = 1; // single-row, non-colliding buffer
+const BUFFER_HEIGHT: usize = 20; // single-row, non-colliding buffer
 const TOTAL_HEIGHT: usize = VISIBLE_HEIGHT + BUFFER_HEIGHT;
 const LOCK_DELAY_MS: f32 = 500.0;
 
@@ -304,6 +305,21 @@ impl Default for InputState {
     }
 }
 
+impl From<InputFrame> for InputState {
+    fn from(value: InputFrame) -> Self {
+        Self {
+            left: value.left,
+            right: value.right,
+            soft_drop: value.soft_drop,
+            hard_drop: value.hard_drop,
+            rotate_ccw: value.rotate_ccw,
+            rotate_cw: value.rotate_cw,
+            rotate_180: value.rotate_180,
+            hold: value.hold,
+        }
+    }
+}
+
 fn rotate_point(p: Point, rot: Rotation) -> Point {
     match rot {
         Rotation::Spawn => p,
@@ -314,56 +330,103 @@ fn rotate_point(p: Point, rot: Rotation) -> Point {
 }
 
 fn shape_blocks(piece: Tetromino, rotation: Rotation) -> [Point; 4] {
-    // Base spawn shapes per Guideline SRS (y up).
-    let base = match piece {
-        Tetromino::I => [
-            Point { x: -1, y: 0 },
-            Point { x: 0, y: 0 },
-            Point { x: 1, y: 0 },
-            Point { x: 2, y: 0 },
-        ],
-        Tetromino::O => [
-            Point { x: 0, y: 0 },
-            Point { x: 1, y: 0 },
-            Point { x: 0, y: 1 },
-            Point { x: 1, y: 1 },
-        ],
-        Tetromino::T => [
-            Point { x: -1, y: 0 },
-            Point { x: 0, y: 0 },
-            Point { x: 1, y: 0 },
-            Point { x: 0, y: 1 },
-        ],
-        Tetromino::J => [
-            Point { x: -1, y: 0 },
-            Point { x: 0, y: 0 },
-            Point { x: 1, y: 0 },
-            Point { x: -1, y: 1 },
-        ],
-        Tetromino::L => [
-            Point { x: -1, y: 0 },
-            Point { x: 0, y: 0 },
-            Point { x: 1, y: 0 },
-            Point { x: 1, y: 1 },
-        ],
-        Tetromino::S => [
-            Point { x: -1, y: 0 },
-            Point { x: 0, y: 0 },
-            Point { x: 0, y: 1 },
-            Point { x: 1, y: 1 },
-        ],
-        Tetromino::Z => [
-            Point { x: -1, y: 1 },
-            Point { x: 0, y: 1 },
-            Point { x: 0, y: 0 },
-            Point { x: 1, y: 0 },
-        ],
-    };
-    let mut rotated = [Point { x: 0, y: 0 }; 4];
-    for (i, p) in base.iter().enumerate() {
-        rotated[i] = rotate_point(*p, rotation);
+    // Guideline SRS shapes with correct rotation centers:
+    // I/O rotate about grid intersections; JLSTZ rotate about a mino center.
+    match piece {
+        Tetromino::I => match rotation {
+            Rotation::Spawn => [
+                Point { x: -1, y: 0 },
+                Point { x: 0, y: 0 },
+                Point { x: 1, y: 0 },
+                Point { x: 2, y: 0 },
+            ],
+            Rotation::Right => [
+                Point { x: 1, y: 1 },
+                Point { x: 1, y: 0 },
+                Point { x: 1, y: -1 },
+                Point { x: 1, y: -2 },
+            ],
+            Rotation::Reverse => [
+                Point { x: -1, y: -1 },
+                Point { x: 0, y: -1 },
+                Point { x: 1, y: -1 },
+                Point { x: 2, y: -1 },
+            ],
+            Rotation::Left => [
+                Point { x: 0, y: 1 },
+                Point { x: 0, y: 0 },
+                Point { x: 0, y: -1 },
+                Point { x: 0, y: -2 },
+            ],
+        },
+        Tetromino::O => match rotation {
+            Rotation::Spawn => [
+                Point { x: 0, y: 0 },
+                Point { x: 1, y: 0 },
+                Point { x: 0, y: 1 },
+                Point { x: 1, y: 1 },
+            ],
+            Rotation::Right => [
+                Point { x: 1, y: 0 },
+                Point { x: 1, y: 1 },
+                Point { x: 2, y: 0 },
+                Point { x: 2, y: 1 },
+            ],
+            Rotation::Reverse => [
+                Point { x: 1, y: -1 },
+                Point { x: 2, y: -1 },
+                Point { x: 1, y: 0 },
+                Point { x: 2, y: 0 },
+            ],
+            Rotation::Left => [
+                Point { x: 0, y: -1 },
+                Point { x: 1, y: -1 },
+                Point { x: 0, y: 0 },
+                Point { x: 1, y: 0 },
+            ],
+        },
+        _ => {
+            // Base spawn shapes per Guideline SRS (y up).
+            let base = match piece {
+                Tetromino::T => [
+                    Point { x: -1, y: 0 },
+                    Point { x: 0, y: 0 },
+                    Point { x: 1, y: 0 },
+                    Point { x: 0, y: 1 },
+                ],
+                Tetromino::J => [
+                    Point { x: -1, y: 0 },
+                    Point { x: 0, y: 0 },
+                    Point { x: 1, y: 0 },
+                    Point { x: -1, y: 1 },
+                ],
+                Tetromino::L => [
+                    Point { x: -1, y: 0 },
+                    Point { x: 0, y: 0 },
+                    Point { x: 1, y: 0 },
+                    Point { x: 1, y: 1 },
+                ],
+                Tetromino::S => [
+                    Point { x: -1, y: 0 },
+                    Point { x: 0, y: 0 },
+                    Point { x: 0, y: 1 },
+                    Point { x: 1, y: 1 },
+                ],
+                Tetromino::Z => [
+                    Point { x: -1, y: 1 },
+                    Point { x: 0, y: 1 },
+                    Point { x: 0, y: 0 },
+                    Point { x: 1, y: 0 },
+                ],
+                Tetromino::I | Tetromino::O => unreachable!(),
+            };
+            let mut rotated = [Point { x: 0, y: 0 }; 4];
+            for (i, p) in base.iter().enumerate() {
+                rotated[i] = rotate_point(*p, rotation);
+            }
+            rotated
+        }
     }
-    rotated
 }
 
 fn spawn_blocks(piece: Tetromino) -> [Point; 4] {
@@ -510,6 +573,22 @@ impl Board {
         }
         None
     }
+
+    fn add_garbage(&mut self, lines: u32) {
+        if lines == 0 {
+            return;
+        }
+        let mut rng = thread_rng();
+        for _ in 0..lines {
+            for y in (1..TOTAL_HEIGHT).rev() {
+                self.cells[y] = self.cells[y - 1];
+            }
+            let hole = rng.gen_range(0..WIDTH);
+            let mut row = [8u8; WIDTH];
+            row[hole] = 0;
+            self.cells[0] = row;
+        }
+    }
 }
 
 #[derive(Default)]
@@ -558,10 +637,48 @@ impl KickTable {
 }
 
 #[derive(Serialize)]
+pub struct PlayerStats {
+    pub time_ms: f32,
+    pub pieces: u32,
+    pub keys: u32,
+    pub attack: u32,
+    pub finesse: u32,
+    pub lines_sent: u32,
+}
+
+impl Default for PlayerStats {
+    fn default() -> Self {
+        Self {
+            time_ms: 0.0,
+            pieces: 0,
+            keys: 0,
+            attack: 0,
+            finesse: 0,
+            lines_sent: 0,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct PlayerStatsView {
+    pub time_ms: f32,
+    pub pieces: u32,
+    pub keys: u32,
+    pub attack: u32,
+    pub finesse: u32,
+    pub pps: f32,
+    pub kpp: f32,
+    pub lines_sent: u32,
+    pub pending_garbage: u32,
+}
+
+#[derive(Serialize)]
 pub struct PlayerView {
     pub field: Vec<u8>,
     pub active: Vec<Point>,
     pub active_color: u8,
+    pub active_piece: u8,
+    pub active_rotation: String,
     pub ghost: Vec<Point>,
     pub hold: Option<u8>,
     pub hold_blocks: Option<Vec<Point>>,
@@ -569,6 +686,7 @@ pub struct PlayerView {
     pub next: Vec<u8>,
     pub next_blocks: Vec<Vec<Point>>,
     pub topped_out: bool,
+    pub stats: PlayerStatsView,
 }
 
 #[derive(Serialize)]
@@ -582,6 +700,7 @@ pub struct BotPlan {
     pub piece: u8,
     pub x: i32,
     pub rotation: String,
+    pub y: i32,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -619,6 +738,9 @@ struct Player {
     held_on_turn: bool,
     randomizer: Box<dyn Randomizer>,
     topped_out: bool,
+    pending_garbage: u32,
+    combo: u32,
+    back_to_back: bool,
 }
 
 impl Player {
@@ -637,6 +759,9 @@ impl Player {
             held_on_turn: false,
             randomizer,
             topped_out: false,
+            pending_garbage: 0,
+            combo: 0,
+            back_to_back: false,
         }
     }
 
@@ -702,6 +827,90 @@ impl Player {
 }
 
 impl Versus {
+    fn on_piece_locked(&mut self, idx: usize, cleared: usize) {
+        // Work with locals to avoid aliasing self borrows.
+        let attack_out: u32;
+        let mut apply_garbage = false;
+        {
+            let player = &mut self.players[idx];
+            let stats = &mut self.stats[idx];
+            stats.pieces = stats.pieces.saturating_add(1);
+
+            if cleared > 0 {
+                player.combo = player.combo.saturating_add(1);
+            } else {
+                player.combo = 0;
+                apply_garbage = true;
+            }
+
+            let perfect_clear = player.board.max_height() == 0;
+            let mut attack = match cleared {
+                0 => self.attack_table._0_lines as u32,
+                1 => self.attack_table._1_line_single as u32,
+                2 => self.attack_table._2_lines_double as u32,
+                3 => self.attack_table._3_lines_triple as u32,
+                _ => self.attack_table._4_lines as u32,
+            };
+
+            let combo_idx = player.combo.saturating_sub(1);
+            let combo_bonus = match combo_idx {
+                0 => self.combo_table.c0,
+                1 => self.combo_table.c1,
+                2 => self.combo_table.c2,
+                3 => self.combo_table.c3,
+                4 => self.combo_table.c4,
+                5 => self.combo_table.c5,
+                6 => self.combo_table.c6,
+                7 => self.combo_table.c7,
+                8 => self.combo_table.c8,
+                9 => self.combo_table.c9,
+                10 => self.combo_table.c10,
+                11 => self.combo_table.c11,
+                _ => self.combo_table.c12_plus,
+            } as u32;
+            attack = attack.saturating_add(combo_bonus);
+
+            if player.back_to_back && cleared >= 4 {
+                attack = attack.saturating_add(self.attack_table.back_to_back_bonus as u32);
+            }
+            if perfect_clear {
+                attack = attack.saturating_add(self.attack_table.perfect_clear as u32);
+            }
+            player.back_to_back = cleared >= 4;
+
+            if attack > 0 {
+                let pending = &mut player.pending_garbage;
+                if *pending >= attack {
+                    *pending -= attack;
+                    attack = 0;
+                } else {
+                    attack -= *pending;
+                    *pending = 0;
+                }
+            }
+
+            attack_out = attack;
+            stats.attack = stats.attack.saturating_add(cleared as u32);
+        }
+
+        // Apply any blocked garbage now that combo is broken.
+        if apply_garbage {
+            let pending = self.players[idx].pending_garbage;
+            if pending > 0 {
+                self.players[idx].board.add_garbage(pending);
+                self.players[idx].pending_garbage = 0;
+            }
+        }
+
+        // Deliver outgoing attack after previous borrows are released.
+        if attack_out > 0 {
+            let opp = if idx == 0 { 1 } else { 0 };
+            self.players[opp].pending_garbage =
+                self.players[opp].pending_garbage.saturating_add(attack_out);
+            self.stats[idx].lines_sent = self.stats[idx].lines_sent.saturating_add(attack_out);
+        }
+    }
+
     fn apply_plan(&mut self, plan: BotPlan) {
         // Only apply if current piece matches
         let active_piece = self.players[1].active.piece.color_id();
@@ -718,14 +927,26 @@ impl Versus {
         };
         self.players[1].active.rotation = rot;
         self.players[1].active.x = plan.x;
-        // Drop to lowest valid height and lock.
+        self.players[1].active.y = plan.y;
         let blocks = self.players[1].active.blocks();
-        if let Some(y) = self.players[1].board.lowest_drop_height(plan.x, &blocks) {
-            self.players[1].active.y = y;
-            self.players[1].lock_piece();
+        if !self.players[1].board.collision(&self.players[1].active) {
+            let cleared = self.players[1].lock_piece();
+            self.on_piece_locked(1, cleared);
             self.fall_accum[1] = 0.0;
         } else {
-            // If invalid, leave plan pending.
+            // If invalid, drop to lowest valid height and lock if possible.
+            if let Some(y) = self.players[1].board.lowest_drop_height(plan.x, &blocks) {
+                let mut ap = self.players[1].active.clone();
+                ap.y = y;
+                if !self.players[1].board.collision(&ap) {
+                    self.players[1].active = ap;
+                    let cleared = self.players[1].lock_piece();
+                    self.on_piece_locked(1, cleared);
+                    self.fall_accum[1] = 0.0;
+                    return;
+                }
+            }
+            // Keep pending if still invalid.
             self.bot_plan = Some(plan);
         }
     }
@@ -756,6 +977,26 @@ impl From<InputState> for InputFrame {
             hold: value.hold,
         }
     }
+}
+
+fn count_input_edges(prev: &InputState, curr: &InputState) -> u32 {
+    let mut edges = 0;
+    let fields = [
+        (prev.left, curr.left),
+        (prev.right, curr.right),
+        (prev.soft_drop, curr.soft_drop),
+        (prev.hard_drop, curr.hard_drop),
+        (prev.rotate_ccw, curr.rotate_ccw),
+        (prev.rotate_cw, curr.rotate_cw),
+        (prev.rotate_180, curr.rotate_180),
+        (prev.hold, curr.hold),
+    ];
+    for (p, c) in fields {
+        if !p && c {
+            edges += 1;
+        }
+    }
+    edges
 }
 
 struct Controller {
@@ -921,6 +1162,10 @@ struct Versus {
     fall_accum: [f32; 2],
     gravity_ms: f32,
     bot_plan: Option<BotPlan>,
+    stats: [PlayerStats; 2],
+    last_inputs: [InputState; 2],
+    attack_table: AttackTable,
+    combo_table: ComboTable,
 }
 
 impl Versus {
@@ -936,16 +1181,27 @@ impl Versus {
             fall_accum: [0.0, 0.0],
             gravity_ms: 1000.0,
             bot_plan: None,
+            stats: [PlayerStats::default(), PlayerStats::default()],
+            last_inputs: [InputState::default(), InputState::default()],
+            attack_table: default_attack_table(),
+            combo_table: default_combo_table(),
         }
     }
 
     fn tick(&mut self, dt_ms: f32, input0: InputFrame) {
+        for s in self.stats.iter_mut() {
+            s.time_ms += dt_ms;
+        }
         self.controllers[0].update_inputs(input0);
+        self.stats[0].keys += count_input_edges(&self.last_inputs[0], &input0.clone().into());
+        self.last_inputs[0] = input0.into();
         if let Some(plan) = self.bot_plan.take() {
             self.apply_plan(plan);
         } else {
             let bot_input = self.bot_driver.update(&mut self.players[1], dt_ms);
             self.controllers[1].update_inputs(bot_input);
+            self.stats[1].keys += count_input_edges(&self.last_inputs[1], &bot_input.clone().into());
+            self.last_inputs[1] = bot_input.into();
         }
 
         for idx in 0..2 {
@@ -961,7 +1217,8 @@ impl Versus {
         }
         let (mut moved, mut rotated) = (false, false);
         if self.controllers[idx].take_hard_drop() {
-            self.players[idx].hard_drop();
+            let cleared = self.players[idx].hard_drop();
+            self.on_piece_locked(idx, cleared);
             self.fall_accum[idx] = 0.0;
             return;
         }
@@ -1054,7 +1311,8 @@ impl Versus {
         if on_ground {
             piece.lock_timer -= dt_ms;
             if piece.lock_timer <= 0.0 {
-                self.players[idx].lock_piece();
+                let cleared = self.players[idx].lock_piece();
+                self.on_piece_locked(idx, cleared);
                 self.fall_accum[idx] = 0.0;
             }
         } else {
@@ -1202,10 +1460,24 @@ impl Versus {
                 .map(|p| spawn_blocks(*p).to_vec())
                 .collect();
             let hold_blocks = self.players[idx].hold.map(|p| spawn_blocks(p).to_vec());
+            let stats = &self.stats[idx];
+            let time_s = if stats.time_ms > 0.0 { stats.time_ms / 1000.0 } else { 0.0 };
+            let pps = if time_s > 0.0 {
+                stats.pieces as f32 / time_s
+            } else {
+                0.0
+            };
+            let kpp = if stats.pieces > 0 {
+                stats.keys as f32 / stats.pieces as f32
+            } else {
+                0.0
+            };
             players.push(PlayerView {
                 field,
                 active,
                 active_color: self.players[idx].active.piece.color_id(),
+                active_piece: self.players[idx].active.piece.color_id(),
+                active_rotation: format!("{:?}", self.players[idx].active.rotation),
                 ghost,
                 hold: self.players[idx].hold.map(|p| p.color_id()),
                 hold_blocks,
@@ -1213,6 +1485,17 @@ impl Versus {
                 next,
                 next_blocks,
                 topped_out: self.players[idx].topped_out,
+                stats: PlayerStatsView {
+                    time_ms: stats.time_ms,
+                    pieces: stats.pieces,
+                    keys: stats.keys,
+                    attack: stats.attack,
+                    finesse: stats.finesse,
+                    pps,
+                    kpp,
+                    lines_sent: stats.lines_sent,
+                    pending_garbage: self.players[idx].pending_garbage,
+                },
             });
         }
         FrameView {
@@ -1238,22 +1521,96 @@ impl Player {
 pub struct TbpFrame {
     pub board: Vec<u8>,
     pub active: Vec<Point>,
+    pub active_piece: u8,
+    pub active_rotation: String,
     pub hold: Option<u8>,
     pub next: Vec<u8>,
+    pub attack_table: AttackTable,
+    pub combo_table: ComboTable,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct AttackTable {
+    pub _0_lines: u8,
+    pub _1_line_single: u8,
+    pub _2_lines_double: u8,
+    pub _3_lines_triple: u8,
+    pub _4_lines: u8,
+    pub t_spin_double: u8,
+    pub t_spin_triple: u8,
+    pub t_spin_single: u8,
+    pub t_spin_mini_single: u8,
+    pub perfect_clear: u8,
+    pub back_to_back_bonus: u8,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ComboTable {
+    pub c0: u8,
+    pub c1: u8,
+    pub c2: u8,
+    pub c3: u8,
+    pub c4: u8,
+    pub c5: u8,
+    pub c6: u8,
+    pub c7: u8,
+    pub c8: u8,
+    pub c9: u8,
+    pub c10: u8,
+    pub c11: u8,
+    pub c12_plus: u8,
+}
+
+fn default_attack_table() -> AttackTable {
+    AttackTable {
+        _0_lines: 0,
+        _1_line_single: 0,
+        _2_lines_double: 1,
+        _3_lines_triple: 2,
+        _4_lines: 4,
+        t_spin_double: 4,
+        t_spin_triple: 6,
+        t_spin_single: 2,
+        t_spin_mini_single: 0,
+        perfect_clear: 10,
+        back_to_back_bonus: 1,
+    }
+}
+
+fn default_combo_table() -> ComboTable {
+    ComboTable {
+        c0: 0,
+        c1: 0,
+        c2: 1,
+        c3: 1,
+        c4: 1,
+        c5: 2,
+        c6: 2,
+        c7: 3,
+        c8: 3,
+        c9: 4,
+        c10: 4,
+        c11: 4,
+        c12_plus: 5,
+    }
 }
 
 fn tbp_frame_for(player: &Player) -> TbpFrame {
-    let mut board = Vec::with_capacity(WIDTH * TOTAL_HEIGHT);
-    for row in 0..TOTAL_HEIGHT {
+    let mut board = vec![0u8; WIDTH * 40];
+    for row in 0..TOTAL_HEIGHT.min(40) {
         for x in 0..WIDTH {
-            board.push(player.board.cells[row][x]);
+            board[row * WIDTH + x] = player.board.cells[row][x];
         }
     }
     TbpFrame {
         board,
         active: player.active.blocks().to_vec(),
+        active_piece: player.active.piece.color_id(),
+        active_rotation: format!("{:?}", player.active.rotation).to_lowercase(),
         hold: player.hold.map(|p| p.color_id()),
         next: player.queue.iter().map(|p| p.color_id()).collect(),
+        attack_table: default_attack_table(),
+        combo_table: default_combo_table(),
     }
 }
 

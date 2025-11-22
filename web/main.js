@@ -16,7 +16,6 @@ const STORAGE_KEY = "tetris-wasm-settings";
 const CONTROLS_KEY = "tetris-wasm-controls";
 const VISIBLE_HEIGHT = 20; // render bottom 20 rows
 const WIDTH = 10;
-let needsResize = true;
 
 let game;
 let inputState = {
@@ -32,10 +31,19 @@ let inputState = {
 let bindings = loadControls();
 let waitingForBind = null;
 let previewCount = 6;
-let needsResize = true;
 let botSocket = null;
 let lastBotPiece = null;
+let lastBotQueue = [];
 let botReady = false;
+let useBot = true;
+let botName = "coldclear2";
+
+const BotStatus = {
+  DISCONNECTED: "disconnected",
+  CONNECTING: "connecting",
+  READY: "ready",
+  ERROR: "error",
+};
 
 const actions = [
   { id: "left", label: "Move Left", field: "move_left" },
@@ -159,6 +167,11 @@ function createGameFromUI() {
   });
   game = new GameClient(settings, pps, randomizers);
   window.tbpSnapshot = () => game.tbpState(1);
+  lastBotPiece = null;
+  lastBotQueue = [];
+  if (botReady) {
+    sendStartState();
+  }
 }
 
 function restoreSettings() {
@@ -181,6 +194,10 @@ function restoreSettings() {
 
 function bindKeys() {
   window.addEventListener("keydown", (e) => {
+    if (e.code === "KeyB") {
+      useBot = !useBot;
+      return;
+    }
     if (waitingForBind) {
       e.preventDefault();
       bindings[waitingForBind] = e.code;
@@ -209,9 +226,6 @@ function bindKeys() {
 }
 
 function drawBoard(canvas, player, gridStyle) {
-  if (needsResize) {
-    resizeAllCanvases();
-  }
   const ctx = canvas.getContext("2d");
   const w = canvas.width;
   const h = canvas.height;
@@ -284,9 +298,6 @@ function computeBaseCell() {
 
 
 function drawHold(canvas, player) {
-  if (needsResize) {
-    resizeAllCanvases();
-  }
   const ctx = canvas.getContext("2d");
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   if (!player.hold || !player.hold_blocks) return;
@@ -312,9 +323,6 @@ function drawHold(canvas, player) {
 }
 
 function drawNext(canvas, player, count) {
-  if (needsResize) {
-    resizeAllCanvases();
-  }
   const ctx = canvas.getContext("2d");
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   const rows = Math.min(count, player.next.length);
@@ -342,6 +350,32 @@ function drawNext(canvas, player, count) {
   }
 }
 
+function formatNumber(num, digits = 2) {
+  if (!isFinite(num)) return "0.00";
+  return num.toFixed(digits);
+}
+
+function updateStats(players, dt) {
+  for (let i = 0; i < players.length; i++) {
+    const player = players[i];
+    const prefix = i === 0 ? "player" : "bot";
+    const stats = player.stats || {};
+    const timeSec = (stats.time_ms || 0) / 1000;
+    const timeEl = document.getElementById(`${prefix}-time`);
+    const attackEl = document.getElementById(`${prefix}-attack`);
+    const finesseEl = document.getElementById(`${prefix}-finesse`);
+    const ppsEl = document.getElementById(`${prefix}-pps`);
+    const kppEl = document.getElementById(`${prefix}-kpp`);
+    const linesEl = document.getElementById(`${prefix}-lines`);
+    if (timeEl) timeEl.textContent = `${formatNumber(timeSec, 1)}s`;
+    if (attackEl) attackEl.textContent = `${stats.attack ?? 0}`;
+    if (finesseEl) finesseEl.textContent = `${stats.finesse ?? 0}`;
+    if (ppsEl) ppsEl.textContent = formatNumber(stats.pps || 0, 2);
+    if (kppEl) kppEl.textContent = formatNumber(stats.kpp || 0, 2);
+    if (linesEl) linesEl.textContent = `${stats.lines_sent ?? 0}`;
+  }
+}
+
 async function main() {
   await init();
   setupControlsUI();
@@ -350,8 +384,8 @@ async function main() {
   attachRandomizerSelect("randBot", "randBotPiece");
   createGameFromUI();
   bindKeys();
-  resizeAllCanvases();
-  window.addEventListener("resize", () => (needsResize = true));
+  setBotStatus(BotStatus.DISCONNECTED, "Disconnected");
+  window.addEventListener("resize", () => {});
 
   const toggleSettings = document.getElementById("toggleSettings");
   const settingsPanel = document.getElementById("settingsPanel");
@@ -396,6 +430,7 @@ async function main() {
         drawHold(holdBot, view.players[1]);
         drawNext(nextPlayer, view.players[0], previewCount);
         drawNext(nextBot, view.players[1], previewCount);
+        updateStats(view.players, dt);
         driveBot(view.players[1]);
       }
     }
@@ -432,63 +467,134 @@ function syncCanvasSize(canvas) {
 }
 
 // Bot bridge (TBP over websocket to cold-clear-2 via bot_bridge)
+function setBotStatus(state, text) {
+  const dot = document.getElementById("botStatusDot");
+  const label = document.getElementById("botStatusText");
+  if (dot) {
+    dot.className = `status-dot ${state}`;
+  }
+  if (label && typeof text === "string") {
+    label.textContent = text;
+  }
+}
+
 function connectBotBridge() {
+  if (botSocket) {
+    try {
+      botSocket.close();
+    } catch (_) {}
+  }
+  botReady = false;
+  setBotStatus(BotStatus.CONNECTING, "Connecting...");
   try {
     botSocket = new WebSocket("ws://127.0.0.1:9000");
   } catch (e) {
     console.warn("Bot bridge connection failed:", e);
+    setBotStatus(BotStatus.ERROR, "Socket failed");
     return;
   }
   botSocket.onopen = () => {
     botReady = false;
-    sendBot({ type: "rules" });
     lastBotPiece = null;
+    lastBotQueue = [];
+    setBotStatus(BotStatus.CONNECTING, "Waiting for bot...");
+    sendBot({ type: "rules" });
   };
-  botSocket.onmessage = (evt) => {
-    try {
-      const msg = JSON.parse(evt.data);
-      if (msg.type === "ready") {
-        botReady = true;
-        sendStartState();
-      } else if (msg.type === "suggestion" && msg.moves && msg.moves.length > 0) {
-        applyBotMove(msg.moves[0]);
-      }
-    } catch (e) {
-      console.warn("Bot bridge parse error", e);
-    }
+  botSocket.onmessage = handleBotMessage;
+  botSocket.onerror = (e) => {
+    console.warn("Bot bridge error", e);
+    setBotStatus(BotStatus.ERROR, "Connection error");
   };
-  botSocket.onerror = (e) => console.warn("Bot bridge error", e);
   botSocket.onclose = () => {
     botReady = false;
     botSocket = null;
+    setBotStatus(BotStatus.DISCONNECTED, "Disconnected");
   };
 }
 
 function sendBot(obj) {
-  if (botSocket && botSocket.readyState === WebSocket.OPEN) {
-    botSocket.send(JSON.stringify(obj));
+  if (!botSocket || botSocket.readyState !== WebSocket.OPEN) return;
+  botSocket.send(JSON.stringify(obj));
+}
+
+function handleBotMessage(evt) {
+  let msg;
+  try {
+    msg = JSON.parse(evt.data);
+  } catch (e) {
+    console.warn("Bot bridge parse error", e);
+    return;
+  }
+  if (!msg || !msg.type) return;
+  if (msg.type === "info") {
+    botName = msg.name || botName;
+    console.log(`Bot connected: ${botName} ${msg.version || ""}`.trim());
+    setBotStatus(BotStatus.CONNECTING, `Handshaking (${botName})`);
+    return;
+  }
+  if (msg.type === "ready") {
+    botReady = true;
+    setBotStatus(BotStatus.READY, `Ready (${botName})`);
+    sendStartState();
+    return;
+  }
+  if (msg.type === "suggestion" && msg.moves && msg.moves.length > 0) {
+    applyBotMove(msg.moves[0]);
+    sendBot({ type: "play", move: msg.moves[0] });
   }
 }
 
 function colorIdToPiece(id) {
   switch (id) {
     case 1:
-      return "i";
+      return "I";
     case 2:
-      return "j";
+      return "J";
     case 3:
-      return "l";
+      return "L";
     case 4:
-      return "o";
+      return "O";
     case 5:
-      return "s";
+      return "S";
     case 6:
-      return "z";
+      return "Z";
     case 7:
-      return "t";
+      return "T";
     default:
       return null;
   }
+}
+
+function normalizeRotation(rotation) {
+  switch ((rotation || "").toLowerCase()) {
+    case "north":
+    case "spawn":
+      return "north";
+    case "east":
+    case "right":
+      return "east";
+    case "south":
+    case "reverse":
+      return "south";
+    case "west":
+    case "left":
+      return "west";
+    default:
+      return "north";
+  }
+}
+
+function placementToPlan(move) {
+  if (!move || !move.location) return null;
+  const loc = move.location;
+  const pieceId = pieceNameToColor(loc.type);
+  if (!pieceId && pieceId !== 0) return null;
+  return {
+    piece: pieceId,
+    x: loc.x,
+    y: loc.y,
+    rotation: normalizeRotation(loc.orientation),
+  };
 }
 
 function pieceNameToColor(name) {
@@ -513,56 +619,62 @@ function pieceNameToColor(name) {
 }
 
 function applyBotMove(move) {
-  if (!move || !move.location) return;
-  const loc = move.location;
-  const pieceId = pieceNameToColor(loc.type);
-  if (!pieceId) return;
-  game.setBotPlan({
-    piece: pieceId,
-    x: loc.x,
-    rotation: (loc.orientation || "").toLowerCase(),
-  });
+  if (!useBot) return;
+  const plan = placementToPlan(move);
+  if (!plan) return;
+  try {
+    game.setBotPlan(plan);
+  } catch (e) {
+    console.warn("Failed to apply bot plan", e);
+  }
 }
 
-let botReady = false;
 function driveBot(botPlayer) {
-  if (!botReady) return;
+  if (!useBot || !botReady) return;
+  if (!botSocket || botSocket.readyState !== WebSocket.OPEN) return;
   const activeId = botPlayer.active_color;
+  const nextQueue = (botPlayer.next || []).slice();
+
+  // When the preview queue shifts (piece locked), push the newly revealed piece to the bot.
+  if (lastBotQueue.length && nextQueue.length === lastBotQueue.length) {
+    const shifted = nextQueue.slice(0, nextQueue.length - 1).every((v, idx) => v === lastBotQueue[idx + 1]);
+    if (shifted) {
+      const newTail = nextQueue[nextQueue.length - 1];
+      const pieceName = colorIdToPiece(newTail);
+      if (pieceName) {
+        sendBot({ type: "new_piece", piece: pieceName });
+      }
+    }
+  }
+  lastBotQueue = nextQueue;
+
   if (activeId !== lastBotPiece) {
     lastBotPiece = activeId;
-    const pieceName = colorIdToPiece(activeId);
-    if (pieceName) {
-      sendBot({ type: "new_piece", piece: pieceName });
-      sendBot({ type: "suggest" });
-    }
+    sendBot({ type: "suggest" });
   }
 }
 
 function sendStartState() {
-  const state = game.tbpState(1);
-  const board = [];
-  const rows = 40;
+  if (!game || !botSocket || botSocket.readyState !== WebSocket.OPEN) return;
+  let state;
+  try {
+    state = game.tbpState(1);
+  } catch (e) {
+    console.warn("Failed to build TBP start state", e);
+    return;
+  }
+  if (!state) return;
   const cols = 10;
-  for (let y = 0; y < rows; y++) {
-    const row = new Array(cols).fill(null);
-    board.push(row);
+  const board = buildTbpBoard(state, cols);
+  const queue = [];
+  const activePiece = colorIdToPiece(state.active_piece);
+  if (activePiece) {
+    queue.push(activePiece);
   }
-  // state.board is bottom-up visible+buffer (21 rows) flattened bottom to top
-  const totalCells = state.board.length;
-  const stateRows = Math.floor(totalCells / cols);
-  for (let y = 0; y < stateRows; y++) {
-    for (let x = 0; x < cols; x++) {
-      const idx = y * cols + x;
-      const val = state.board[idx];
-      if (val && val !== 0) {
-        board[y][x] = "x";
-      }
-    }
-  }
-  const queue = (state.next || [])
-    .map((c) => colorIdToPiece(c))
-    .filter(Boolean)
-    .slice(0, previewCount);
+  (state.next || []).forEach((c) => {
+    const mapped = colorIdToPiece(c);
+    if (mapped) queue.push(mapped);
+  });
   const hold = state.hold ? colorIdToPiece(state.hold) : null;
   sendBot({
     type: "start",
@@ -571,6 +683,25 @@ function sendStartState() {
     hold,
     combo: 0,
     back_to_back: false,
-    randomizer: { type: "seven_bag", bag_state: [] },
   });
+  lastBotPiece = state.active_piece || null;
+  lastBotQueue = (state.next || []).slice();
+  sendBot({ type: "suggest" });
+}
+
+function buildTbpBoard(state, cols) {
+  const board = [];
+  const rows = Math.floor(state.board.length / cols);
+  for (let y = 0; y < rows; y++) {
+    const row = new Array(cols).fill(null);
+    for (let x = 0; x < cols; x++) {
+      const idx = y * cols + x;
+      const cell = state.board[idx];
+      if (cell && cell !== 0) {
+        row[x] = colorIdToPiece(cell) || "x";
+      }
+    }
+    board.push(row);
+  }
+  return board;
 }

@@ -1,9 +1,18 @@
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+#[cfg(not(target_arch = "wasm32"))]
 use std::env;
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs;
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::Cursor;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
 use tiny_http::{Header, Response, Server, StatusCode};
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr = env::args()
         .nth(1)
@@ -45,6 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn sanitize_path(root: &Path, url: &str) -> Option<PathBuf> {
     let rel = if url == "/" { "index.html" } else { url.trim_start_matches('/') };
     let full = root.join(rel);
@@ -60,6 +70,7 @@ fn sanitize_path(root: &Path, url: &str) -> Option<PathBuf> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn content_type_for(path: &Path) -> &'static str {
     match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
         "html" => "text/html; charset=utf-8",
@@ -74,6 +85,7 @@ fn content_type_for(path: &Path) -> &'static str {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn not_found_response() -> Response<Cursor<Vec<u8>>> {
     Response::from_string("Not Found").with_status_code(StatusCode(404))
 }
