@@ -31,19 +31,16 @@ let inputState = {
 let bindings = loadControls();
 let waitingForBind = null;
 let previewCount = 6;
+const BOT_PLAYER_INDEX = 1;
+let botPps = 1.8;
 let botSocket = null;
-let lastBotPiece = null;
-let lastBotQueue = [];
 let botReady = false;
-let useBot = true;
-let botName = "coldclear2";
-
-const BotStatus = {
-  DISCONNECTED: "disconnected",
-  CONNECTING: "connecting",
-  READY: "ready",
-  ERROR: "error",
-};
+let botPendingStart = false;
+let awaitingSuggestion = false;
+let botLog = [];
+let suggestTimer = null;
+let gameEnded = false;
+let sentStopThisGame = false;
 
 const actions = [
   { id: "left", label: "Move Left", field: "move_left" },
@@ -55,6 +52,190 @@ const actions = [
   { id: "rotate_180", label: "Rotate 180", field: "rotate_180" },
   { id: "hold", label: "Hold", field: "hold" },
 ];
+
+function setBotStatus(state, text = "") {
+  const dot = document.getElementById("botStatusDot");
+  const label = document.getElementById("botStatusText");
+  if (!dot || !label) return;
+  dot.className = "status-dot";
+  label.textContent = text || state;
+  switch (state) {
+    case "connected":
+    case "ready":
+      dot.classList.add("ready");
+      label.textContent = text || "Connected";
+      break;
+    case "connecting":
+      dot.classList.add("connecting");
+      label.textContent = text || "Connecting…";
+      break;
+    case "error":
+      dot.classList.add("error");
+      label.textContent = text || "Error";
+      break;
+    default:
+      dot.classList.add("disconnected");
+      label.textContent = text || "Disconnected";
+  }
+}
+
+function logBot(direction, payload) {
+  const line = `${direction} ${typeof payload === "string" ? payload : JSON.stringify(payload)}`;
+  botLog.push(line);
+  console.log(`[bot ${direction}]`, payload);
+}
+
+function downloadBotLog() {
+  const blob = new Blob([botLog.join("\n")], { type: "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `bot-log-${Date.now()}.txt`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function sendBot(msg) {
+  if (!botSocket || botSocket.readyState !== WebSocket.OPEN) return;
+  logBot("TX", msg);
+  botSocket.send(JSON.stringify(msg));
+}
+
+function requestBotSuggestion() {
+  if (!botReady || !game || gameEnded || !botSocket || botSocket.readyState !== WebSocket.OPEN || awaitingSuggestion) {
+    return;
+  }
+  if (suggestTimer) {
+    clearTimeout(suggestTimer);
+    suggestTimer = null;
+  }
+  const delayMs = 1000 / Math.max(botPps, 0.01);
+  suggestTimer = setTimeout(() => {
+    suggestTimer = null;
+    if (!botReady || !game || !botSocket || botSocket.readyState !== WebSocket.OPEN || awaitingSuggestion) {
+      return;
+    }
+    awaitingSuggestion = true;
+    sendBot({ type: "suggest" });
+  }, delayMs);
+}
+
+function sendBotStart() {
+  if (!botReady || !game || gameEnded || !botSocket || botSocket.readyState !== WebSocket.OPEN) {
+    botPendingStart = true;
+    return;
+  }
+  try {
+    const start = JSON.parse(game.tbpStartJson(BOT_PLAYER_INDEX));
+    const payload = {
+      type: "start",
+      board: start.board,
+      queue: start.queue,
+      hold: start.hold,
+      combo: start.combo,
+      back_to_back: start.back_to_back ?? start.backToBack,
+    };
+    console.debug("[tbp] start", payload);
+    sendBot(payload);
+    botPendingStart = false;
+    awaitingSuggestion = false;
+    requestBotSuggestion();
+  } catch (err) {
+    console.error("Failed to build TBP start:", err);
+    setBotStatus("error", "TBP start failed");
+  }
+}
+
+function handleBotMessage(raw) {
+  let msg = null;
+  try {
+    msg = JSON.parse(raw);
+  } catch (err) {
+    console.warn("Invalid bot message", raw);
+    return;
+  }
+  switch (msg.type) {
+    case "info":
+      setBotStatus("connecting", "Negotiating…");
+      sendBot({ type: "rules" });
+      break;
+    case "ready":
+      botReady = true;
+      setBotStatus("connected");
+      sendBotStart();
+      break;
+    case "suggestion":
+      awaitingSuggestion = false;
+      applyBotSuggestion(msg);
+      break;
+    default:
+      break;
+  }
+}
+
+function applyBotSuggestion(msg) {
+  if (!msg.moves || !msg.moves.length || !game || gameEnded) return;
+  const move = msg.moves[0];
+  try {
+    const result = game.tbpApplyMove(BOT_PLAYER_INDEX, move);
+    if (result.toppedOut) {
+      setBotStatus("error", "Bot topped out");
+      gameEnded = true;
+      sentStopThisGame = true;
+      sendBot({ type: "stop" });
+      if (suggestTimer) {
+        clearTimeout(suggestTimer);
+        suggestTimer = null;
+      }
+      return;
+    }
+    // Re-issue a full start snapshot for the bot, then ask for the next move.
+    sendBotStart();
+  } catch (err) {
+    console.error("Failed to apply bot move:", err);
+    setBotStatus("error", "Apply failed");
+  }
+}
+
+function connectBot() {
+  try {
+    botSocket = new WebSocket("ws://127.0.0.1:9000");
+  } catch (err) {
+    console.error("Failed to open bot socket", err);
+    setBotStatus("error", "Socket failed");
+    return;
+  }
+  setBotStatus("connecting");
+  botReady = false;
+  botPendingStart = true;
+  awaitingSuggestion = false;
+  botLog = [];
+  gameEnded = false;
+  sentStopThisGame = false;
+  botSocket.addEventListener("open", () => {
+    setBotStatus("connecting", "Waiting for info…");
+  });
+  botSocket.addEventListener("message", (ev) => {
+    logBot("RX", ev.data);
+    handleBotMessage(ev.data);
+  });
+  botSocket.addEventListener("close", () => {
+    setBotStatus("disconnected");
+    botReady = false;
+    if (suggestTimer) {
+      clearTimeout(suggestTimer);
+      suggestTimer = null;
+    }
+  });
+  botSocket.addEventListener("error", () => {
+    setBotStatus("error", "Socket error");
+    botReady = false;
+    if (suggestTimer) {
+      clearTimeout(suggestTimer);
+      suggestTimer = null;
+    }
+  });
+}
 
 function loadControls() {
   const saved = localStorage.getItem(CONTROLS_KEY);
@@ -165,13 +346,18 @@ function createGameFromUI() {
       bot: { kind: document.getElementById("randBot").value, piece: document.getElementById("randBotPiece").value },
     },
   });
-  game = new GameClient(settings, pps, randomizers);
-  window.tbpSnapshot = () => game.tbpState(1);
-  lastBotPiece = null;
-  lastBotQueue = [];
-  if (botReady) {
-    sendStartState();
+  botPps = pps;
+  gameEnded = false;
+  sentStopThisGame = false;
+  awaitingSuggestion = false;
+  if (suggestTimer) {
+    clearTimeout(suggestTimer);
+    suggestTimer = null;
   }
+  game = new GameClient(settings, pps, randomizers);
+  window.tbpSnapshot = () => game.tbpStart(1);
+  botPendingStart = true;
+  sendBotStart();
 }
 
 function restoreSettings() {
@@ -194,10 +380,6 @@ function restoreSettings() {
 
 function bindKeys() {
   window.addEventListener("keydown", (e) => {
-    if (e.code === "KeyB") {
-      useBot = !useBot;
-      return;
-    }
     if (waitingForBind) {
       e.preventDefault();
       bindings[waitingForBind] = e.code;
@@ -225,7 +407,7 @@ function bindKeys() {
   });
 }
 
-function drawBoard(canvas, player, gridStyle) {
+function drawBoard(canvas, player, gridStyle, gameOver = false, isWinner = false, pendingGarbage = 0) {
   const ctx = canvas.getContext("2d");
   const w = canvas.width;
   const h = canvas.height;
@@ -280,6 +462,26 @@ function drawBoard(canvas, player, gridStyle) {
   }
   const activeColor = COLORS[player.active_color || 7] || "rgba(255,255,255,0.35)";
   drawBlocks(player.active, activeColor);
+
+  // Incoming garbage bar (Full blocking style).
+  if (pendingGarbage > 0) {
+    const barW = Math.max(4, cell * 0.35);
+    const barX = w - barW - 2;
+    const barH = Math.min(h, (pendingGarbage / VISIBLE_HEIGHT) * h);
+    ctx.fillStyle = "rgba(239, 71, 111, 0.8)";
+    ctx.fillRect(barX, h - barH, barW, barH);
+  }
+
+  if (gameOver) {
+    ctx.fillStyle = "rgba(0,0,0,0.5)";
+    ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = isWinner ? "#5dcf9f" : "#ef476f";
+    ctx.font = `bold ${Math.floor(cell * 1.2)}px "Space Grotesk", sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    const msg = isWinner ? "Winner" : "Top Out";
+    ctx.fillText(msg, w / 2, h / 2);
+  }
 }
 
 function computeBaseCell() {
@@ -383,8 +585,8 @@ async function main() {
   attachRandomizerSelect("randPlayer", "randPlayerPiece");
   attachRandomizerSelect("randBot", "randBotPiece");
   createGameFromUI();
+  connectBot();
   bindKeys();
-  setBotStatus(BotStatus.DISCONNECTED, "Disconnected");
   window.addEventListener("resize", () => {});
 
   const toggleSettings = document.getElementById("toggleSettings");
@@ -405,8 +607,7 @@ async function main() {
     previewCount = Number(e.target.value);
     document.getElementById("previewValue").textContent = `${previewCount}`;
   });
-
-  connectBotBridge();
+  document.getElementById("downloadBotLog").addEventListener("click", downloadBotLog);
 
   let last = performance.now();
   const canvasPlayer = document.getElementById("board-player");
@@ -424,14 +625,43 @@ async function main() {
       const frame = game.tick(dt);
       const view = frame;
       if (view && view.players) {
-        drawBoard(canvasPlayer, view.players[0], view.settings.grid);
-        drawBoard(canvasBot, view.players[1], view.settings.grid);
+        const gameOver = view.players.some((p) => p.topped_out);
+        const playerWins = gameOver && !view.players[0].topped_out && view.players[1].topped_out;
+        const botWins = gameOver && !view.players[1].topped_out && view.players[0].topped_out;
+        if (gameOver && !gameEnded) {
+          gameEnded = true;
+          if (!sentStopThisGame) {
+            sendBot({ type: "stop" });
+            sentStopThisGame = true;
+          }
+          if (suggestTimer) {
+            clearTimeout(suggestTimer);
+            suggestTimer = null;
+          }
+        } else if (!gameOver) {
+          sentStopThisGame = false;
+        }
+        drawBoard(
+          canvasPlayer,
+          view.players[0],
+          view.settings.grid,
+          gameOver,
+          playerWins,
+          view.players[0].stats?.pending_garbage || 0
+        );
+        drawBoard(
+          canvasBot,
+          view.players[1],
+          view.settings.grid,
+          gameOver,
+          botWins,
+          view.players[1].stats?.pending_garbage || 0
+        );
         drawHold(holdPlayer, view.players[0]);
         drawHold(holdBot, view.players[1]);
         drawNext(nextPlayer, view.players[0], previewCount);
         drawNext(nextBot, view.players[1], previewCount);
         updateStats(view.players, dt);
-        driveBot(view.players[1]);
       }
     }
     requestAnimationFrame(loop);
@@ -441,267 +671,4 @@ async function main() {
 
 main();
 
-function resizeAllCanvases() {
-  const baseCell = computeBaseCell();
-  resizeCanvasesWithBaseCell(baseCell);
-  ["board-player", "board-bot", "hold-player", "hold-bot", "next-player", "next-bot"].forEach(
-    (id) => {
-      const el = document.getElementById(id);
-      if (el) {
-        syncCanvasSize(el);
-      }
-    }
-  );
-  needsResize = false;
-}
-
-function syncCanvasSize(canvas) {
-  const rect = canvas.getBoundingClientRect();
-  const dpr = window.devicePixelRatio || 1;
-  const w = Math.max(1, Math.floor(rect.width * dpr));
-  const h = Math.max(1, Math.floor(rect.height * dpr));
-  if (canvas.width !== w || canvas.height !== h) {
-    canvas.width = w;
-    canvas.height = h;
-  }
-}
-
-// Bot bridge (TBP over websocket to cold-clear-2 via bot_bridge)
-function setBotStatus(state, text) {
-  const dot = document.getElementById("botStatusDot");
-  const label = document.getElementById("botStatusText");
-  if (dot) {
-    dot.className = `status-dot ${state}`;
-  }
-  if (label && typeof text === "string") {
-    label.textContent = text;
-  }
-}
-
-function connectBotBridge() {
-  if (botSocket) {
-    try {
-      botSocket.close();
-    } catch (_) {}
-  }
-  botReady = false;
-  setBotStatus(BotStatus.CONNECTING, "Connecting...");
-  try {
-    botSocket = new WebSocket("ws://127.0.0.1:9000");
-  } catch (e) {
-    console.warn("Bot bridge connection failed:", e);
-    setBotStatus(BotStatus.ERROR, "Socket failed");
-    return;
-  }
-  botSocket.onopen = () => {
-    botReady = false;
-    lastBotPiece = null;
-    lastBotQueue = [];
-    setBotStatus(BotStatus.CONNECTING, "Waiting for bot...");
-    sendBot({ type: "rules" });
-  };
-  botSocket.onmessage = handleBotMessage;
-  botSocket.onerror = (e) => {
-    console.warn("Bot bridge error", e);
-    setBotStatus(BotStatus.ERROR, "Connection error");
-  };
-  botSocket.onclose = () => {
-    botReady = false;
-    botSocket = null;
-    setBotStatus(BotStatus.DISCONNECTED, "Disconnected");
-  };
-}
-
-function sendBot(obj) {
-  if (!botSocket || botSocket.readyState !== WebSocket.OPEN) return;
-  botSocket.send(JSON.stringify(obj));
-}
-
-function handleBotMessage(evt) {
-  let msg;
-  try {
-    msg = JSON.parse(evt.data);
-  } catch (e) {
-    console.warn("Bot bridge parse error", e);
-    return;
-  }
-  if (!msg || !msg.type) return;
-  if (msg.type === "info") {
-    botName = msg.name || botName;
-    console.log(`Bot connected: ${botName} ${msg.version || ""}`.trim());
-    setBotStatus(BotStatus.CONNECTING, `Handshaking (${botName})`);
-    return;
-  }
-  if (msg.type === "ready") {
-    botReady = true;
-    setBotStatus(BotStatus.READY, `Ready (${botName})`);
-    sendStartState();
-    return;
-  }
-  if (msg.type === "suggestion" && msg.moves && msg.moves.length > 0) {
-    applyBotMove(msg.moves[0]);
-    sendBot({ type: "play", move: msg.moves[0] });
-  }
-}
-
-function colorIdToPiece(id) {
-  switch (id) {
-    case 1:
-      return "I";
-    case 2:
-      return "J";
-    case 3:
-      return "L";
-    case 4:
-      return "O";
-    case 5:
-      return "S";
-    case 6:
-      return "Z";
-    case 7:
-      return "T";
-    default:
-      return null;
-  }
-}
-
-function normalizeRotation(rotation) {
-  switch ((rotation || "").toLowerCase()) {
-    case "north":
-    case "spawn":
-      return "north";
-    case "east":
-    case "right":
-      return "east";
-    case "south":
-    case "reverse":
-      return "south";
-    case "west":
-    case "left":
-      return "west";
-    default:
-      return "north";
-  }
-}
-
-function placementToPlan(move) {
-  if (!move || !move.location) return null;
-  const loc = move.location;
-  const pieceId = pieceNameToColor(loc.type);
-  if (!pieceId && pieceId !== 0) return null;
-  return {
-    piece: pieceId,
-    x: loc.x,
-    y: loc.y,
-    rotation: normalizeRotation(loc.orientation),
-  };
-}
-
-function pieceNameToColor(name) {
-  switch ((name || "").toLowerCase()) {
-    case "i":
-      return 1;
-    case "j":
-      return 2;
-    case "l":
-      return 3;
-    case "o":
-      return 4;
-    case "s":
-      return 5;
-    case "z":
-      return 6;
-    case "t":
-      return 7;
-    default:
-      return null;
-  }
-}
-
-function applyBotMove(move) {
-  if (!useBot) return;
-  const plan = placementToPlan(move);
-  if (!plan) return;
-  try {
-    game.setBotPlan(plan);
-  } catch (e) {
-    console.warn("Failed to apply bot plan", e);
-  }
-}
-
-function driveBot(botPlayer) {
-  if (!useBot || !botReady) return;
-  if (!botSocket || botSocket.readyState !== WebSocket.OPEN) return;
-  const activeId = botPlayer.active_color;
-  const nextQueue = (botPlayer.next || []).slice();
-
-  // When the preview queue shifts (piece locked), push the newly revealed piece to the bot.
-  if (lastBotQueue.length && nextQueue.length === lastBotQueue.length) {
-    const shifted = nextQueue.slice(0, nextQueue.length - 1).every((v, idx) => v === lastBotQueue[idx + 1]);
-    if (shifted) {
-      const newTail = nextQueue[nextQueue.length - 1];
-      const pieceName = colorIdToPiece(newTail);
-      if (pieceName) {
-        sendBot({ type: "new_piece", piece: pieceName });
-      }
-    }
-  }
-  lastBotQueue = nextQueue;
-
-  if (activeId !== lastBotPiece) {
-    lastBotPiece = activeId;
-    sendBot({ type: "suggest" });
-  }
-}
-
-function sendStartState() {
-  if (!game || !botSocket || botSocket.readyState !== WebSocket.OPEN) return;
-  let state;
-  try {
-    state = game.tbpState(1);
-  } catch (e) {
-    console.warn("Failed to build TBP start state", e);
-    return;
-  }
-  if (!state) return;
-  const cols = 10;
-  const board = buildTbpBoard(state, cols);
-  const queue = [];
-  const activePiece = colorIdToPiece(state.active_piece);
-  if (activePiece) {
-    queue.push(activePiece);
-  }
-  (state.next || []).forEach((c) => {
-    const mapped = colorIdToPiece(c);
-    if (mapped) queue.push(mapped);
-  });
-  const hold = state.hold ? colorIdToPiece(state.hold) : null;
-  sendBot({
-    type: "start",
-    board,
-    queue,
-    hold,
-    combo: 0,
-    back_to_back: false,
-  });
-  lastBotPiece = state.active_piece || null;
-  lastBotQueue = (state.next || []).slice();
-  sendBot({ type: "suggest" });
-}
-
-function buildTbpBoard(state, cols) {
-  const board = [];
-  const rows = Math.floor(state.board.length / cols);
-  for (let y = 0; y < rows; y++) {
-    const row = new Array(cols).fill(null);
-    for (let x = 0; x < cols; x++) {
-      const idx = y * cols + x;
-      const cell = state.board[idx];
-      if (cell && cell !== 0) {
-        row[x] = colorIdToPiece(cell) || "x";
-      }
-    }
-    board.push(row);
-  }
-  return board;
-}
+window.addEventListener("beforeunload", () => {});

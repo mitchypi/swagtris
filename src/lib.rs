@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_wasm_bindgen::{from_value, to_value};
 use wasm_bindgen::prelude::*;
 use web_sys::console;
+use tbp::{data as tbp_data, frontend_msg, randomizer as tbp_randomizer, MaybeUnknown};
 
 const WIDTH: usize = 10;
 const VISIBLE_HEIGHT: usize = 20; // Jstris-style visible field
@@ -55,6 +56,59 @@ impl Tetromino {
             Tetromino::Z => 6,
             Tetromino::T => 7,
         }
+    }
+}
+
+impl From<tbp_data::Piece> for Tetromino {
+    fn from(p: tbp_data::Piece) -> Self {
+        match p {
+            tbp_data::Piece::I => Tetromino::I,
+            tbp_data::Piece::O => Tetromino::O,
+            tbp_data::Piece::T => Tetromino::T,
+            tbp_data::Piece::L => Tetromino::L,
+            tbp_data::Piece::J => Tetromino::J,
+            tbp_data::Piece::S => Tetromino::S,
+            tbp_data::Piece::Z => Tetromino::Z,
+            _ => Tetromino::I,
+        }
+    }
+}
+
+impl From<Tetromino> for tbp_data::Piece {
+    fn from(t: Tetromino) -> Self {
+        match t {
+            Tetromino::I => tbp_data::Piece::I,
+            Tetromino::O => tbp_data::Piece::O,
+            Tetromino::T => tbp_data::Piece::T,
+            Tetromino::L => tbp_data::Piece::L,
+            Tetromino::J => tbp_data::Piece::J,
+            Tetromino::S => tbp_data::Piece::S,
+            Tetromino::Z => tbp_data::Piece::Z,
+        }
+    }
+}
+
+fn from_tbp_orientation(o: tbp_data::Orientation) -> Rotation {
+    match o {
+        tbp_data::Orientation::North => Rotation::Spawn,
+        tbp_data::Orientation::East => Rotation::Right,
+        tbp_data::Orientation::South => Rotation::Reverse,
+        tbp_data::Orientation::West => Rotation::Left,
+        _ => Rotation::Spawn,
+    }
+}
+
+fn color_to_cell_char(color: u8) -> Option<char> {
+    match color {
+        1 => Some('I'),
+        2 => Some('J'),
+        3 => Some('L'),
+        4 => Some('O'),
+        5 => Some('S'),
+        6 => Some('Z'),
+        7 => Some('T'),
+        8 => Some('G'), // garbage
+        _ => None,
     }
 }
 
@@ -166,8 +220,11 @@ impl Default for RandomizerKind {
     }
 }
 
-trait Randomizer {
+trait Randomizer: std::any::Any {
     fn next(&mut self, board: &Board) -> Tetromino;
+    fn bag_state(&self) -> Option<Vec<Tetromino>> {
+        None
+    }
 }
 
 struct TrueRandom;
@@ -210,6 +267,10 @@ impl Randomizer for SevenBag {
             self.refill();
         }
         self.bag.pop().unwrap()
+    }
+
+    fn bag_state(&self) -> Option<Vec<Tetromino>> {
+        Some(self.bag.clone())
     }
 }
 
@@ -266,6 +327,10 @@ impl Randomizer for LoveTris {
             }
         }
         self.bag.bag.remove(best_index)
+    }
+
+    fn bag_state(&self) -> Option<Vec<Tetromino>> {
+        self.bag.bag_state()
     }
 }
 
@@ -429,6 +494,24 @@ fn shape_blocks(piece: Tetromino, rotation: Rotation) -> [Point; 4] {
     }
 }
 
+fn tbp_anchor_offset(piece: Tetromino, rotation: Rotation) -> Point {
+    match piece {
+        Tetromino::I => match rotation {
+            Rotation::Spawn => Point { x: 0, y: 0 },  // middle-left mino
+            Rotation::Right => Point { x: 1, y: 1 },  // middle-top mino
+            Rotation::Reverse => Point { x: 1, y: -1 }, // middle-right mino
+            Rotation::Left => Point { x: 0, y: -1 },   // middle-bottom mino
+        },
+        Tetromino::O => match rotation {
+            Rotation::Spawn => Point { x: 0, y: 0 },   // bottom-left mino
+            Rotation::Right => Point { x: 1, y: 1 },   // top-left mino
+            Rotation::Reverse => Point { x: 2, y: 0 }, // top-right mino
+            Rotation::Left => Point { x: 1, y: -1 },   // bottom-right mino
+        },
+        _ => Point { x: 0, y: 0 }, // JLTSZ centers align with the rotation origin
+    }
+}
+
 fn spawn_blocks(piece: Tetromino) -> [Point; 4] {
     shape_blocks(piece, Rotation::Spawn)
 }
@@ -554,6 +637,15 @@ impl Board {
         0
     }
 
+    fn visible_empty(&self) -> bool {
+        for y in 0..VISIBLE_HEIGHT {
+            if self.cells[y].iter().any(|&c| c != 0) {
+                return false;
+            }
+        }
+        true
+    }
+
     fn lowest_drop_height(&self, x: i32, blocks: &[Point; 4]) -> Option<i32> {
         let mut y = TOTAL_HEIGHT as i32 - 1;
         while y >= 0 {
@@ -574,20 +666,21 @@ impl Board {
         None
     }
 
-    fn add_garbage(&mut self, lines: u32) {
+    fn add_garbage(&mut self, lines: u32) -> bool {
         if lines == 0 {
-            return;
+            return false;
         }
         let mut rng = thread_rng();
+        let hole = rng.gen_range(0..WIDTH);
         for _ in 0..lines {
             for y in (1..TOTAL_HEIGHT).rev() {
                 self.cells[y] = self.cells[y - 1];
             }
-            let hole = rng.gen_range(0..WIDTH);
             let mut row = [8u8; WIDTH];
             row[hole] = 0;
             self.cells[0] = row;
         }
+        self.max_height() > VISIBLE_HEIGHT
     }
 }
 
@@ -621,8 +714,8 @@ impl KickTable {
         const I: [[(i32, i32); 5]; 8] = [
             [(0, 0), (-2, 0), (1, 0), (-2, -1), (1, 2)], // 0->R
             [(0, 0), (2, 0), (-1, 0), (2, 1), (-1, -2)], // R->0
-            [(0, 0), (1, 0), (2, 0), (1, -2), (2, -1)],  // R->2
-            [(0, 0), (-1, 0), (-2, 0), (-1, 2), (-2, 1)],// 2->R
+            [(0, 0), (-1, 0), (2, 0), (-1, 2), (2, -1)], // R->2
+            [(0, 0), (1, 0), (-2, 0), (1, -2), (-2, 1)], // 2->R
             [(0, 0), (2, 0), (-1, 0), (2, 1), (-1, -2)], // 2->L
             [(0, 0), (-2, 0), (1, 0), (-2, -1), (1, 2)], // L->2
             [(0, 0), (1, 0), (2, 0), (1, -2), (2, -1)],  // L->0
@@ -695,12 +788,15 @@ pub struct FrameView {
     pub settings: GameSettings,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-pub struct BotPlan {
-    pub piece: u8,
-    pub x: i32,
-    pub rotation: String,
-    pub y: i32,
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppliedMoveResult {
+    pub lines_cleared: usize,
+    pub topped_out: bool,
+    pub active_piece: Option<tbp_data::Piece>,
+    pub new_queue_piece: Option<tbp_data::Piece>,
+    pub combo: u32,
+    pub back_to_back: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -736,11 +832,14 @@ struct Player {
     queue: Vec<Tetromino>,
     hold: Option<Tetromino>,
     held_on_turn: bool,
+    last_action_was_t_spin: bool,
     randomizer: Box<dyn Randomizer>,
+    randomizer_kind: RandomizerKind,
     topped_out: bool,
     pending_garbage: u32,
     combo: u32,
     back_to_back: bool,
+    last_refill_added: Option<Tetromino>,
 }
 
 impl Player {
@@ -757,15 +856,19 @@ impl Player {
             queue,
             hold: None,
             held_on_turn: false,
+            last_action_was_t_spin: false,
             randomizer,
+            randomizer_kind,
             topped_out: false,
             pending_garbage: 0,
             combo: 0,
             back_to_back: false,
+            last_refill_added: None,
         }
     }
 
     fn set_randomizer(&mut self, kind: RandomizerKind) {
+        self.randomizer_kind = kind.clone();
         self.randomizer = randomizer_from_kind(kind);
         self.queue.clear();
         self.refill_queue();
@@ -774,16 +877,19 @@ impl Player {
     }
 
     fn refill_queue(&mut self) {
+        self.last_refill_added = None;
         while self.queue.len() < 6 {
             let piece = self.randomizer.next(&self.board);
             self.queue.push(piece);
+            self.last_refill_added = Some(piece);
         }
     }
 
     fn spawn_next(&mut self) {
         self.held_on_turn = false;
-        self.refill_queue();
+        self.last_action_was_t_spin = false;
         let next_piece = self.queue.remove(0);
+        self.refill_queue();
         self.active = ActivePiece::new(next_piece);
         if self.board.collision(&self.active) {
             self.topped_out = true;
@@ -791,7 +897,7 @@ impl Player {
         }
     }
 
-    fn hard_drop(&mut self) -> usize {
+    fn hard_drop(&mut self) -> (usize, bool) {
         let mut landing_y = self.active.y;
         loop {
             let test = ActivePiece {
@@ -811,23 +917,20 @@ impl Player {
         self.lock_piece()
     }
 
-    fn lock_piece(&mut self) -> usize {
+    fn lock_piece(&mut self) -> (usize, bool) {
         let color = self.active.piece.color_id();
         let blocks = self.active.blocks();
         self.board
             .lock_piece(self.active.x, self.active.y, &blocks, color);
         let cleared = self.board.clear_lines();
-        log(&format!(
-            "Locked {:?} at ({}, {}) cleared {}",
-            self.active.piece, self.active.x, self.active.y, cleared
-        ));
+        let was_t_spin = self.last_action_was_t_spin && self.active.piece == Tetromino::T && cleared > 0;
         self.spawn_next();
-        cleared
+        (cleared, was_t_spin)
     }
 }
 
 impl Versus {
-    fn on_piece_locked(&mut self, idx: usize, cleared: usize) {
+    fn on_piece_locked(&mut self, idx: usize, cleared: usize, is_t_spin: bool) {
         // Work with locals to avoid aliasing self borrows.
         let attack_out: u32;
         let mut apply_garbage = false;
@@ -843,13 +946,21 @@ impl Versus {
                 apply_garbage = true;
             }
 
-            let perfect_clear = player.board.max_height() == 0;
-            let mut attack = match cleared {
-                0 => self.attack_table._0_lines as u32,
-                1 => self.attack_table._1_line_single as u32,
-                2 => self.attack_table._2_lines_double as u32,
-                3 => self.attack_table._3_lines_triple as u32,
-                _ => self.attack_table._4_lines as u32,
+            let perfect_clear = player.board.visible_empty();
+            let mut attack = if is_t_spin && cleared > 0 {
+                match cleared {
+                    1 => self.attack_table.t_spin_single as u32,
+                    2 => self.attack_table.t_spin_double as u32,
+                    _ => self.attack_table.t_spin_triple as u32,
+                }
+            } else {
+                match cleared {
+                    0 => self.attack_table._0_lines as u32,
+                    1 => self.attack_table._1_line_single as u32,
+                    2 => self.attack_table._2_lines_double as u32,
+                    3 => self.attack_table._3_lines_triple as u32,
+                    _ => self.attack_table._4_lines as u32,
+                }
             };
 
             let combo_idx = player.combo.saturating_sub(1);
@@ -876,6 +987,7 @@ impl Versus {
             if perfect_clear {
                 attack = attack.saturating_add(self.attack_table.perfect_clear as u32);
             }
+            let attack_before_cancel = attack;
             player.back_to_back = cleared >= 4;
 
             if attack > 0 {
@@ -890,14 +1002,17 @@ impl Versus {
             }
 
             attack_out = attack;
-            stats.attack = stats.attack.saturating_add(cleared as u32);
+            stats.attack = stats.attack.saturating_add(attack_before_cancel);
         }
 
         // Apply any blocked garbage now that combo is broken.
         if apply_garbage {
             let pending = self.players[idx].pending_garbage;
             if pending > 0 {
-                self.players[idx].board.add_garbage(pending);
+                let overflow = self.players[idx].board.add_garbage(pending);
+                if overflow {
+                    self.players[idx].topped_out = true;
+                }
                 self.players[idx].pending_garbage = 0;
             }
         }
@@ -911,45 +1026,6 @@ impl Versus {
         }
     }
 
-    fn apply_plan(&mut self, plan: BotPlan) {
-        // Only apply if current piece matches
-        let active_piece = self.players[1].active.piece.color_id();
-        if active_piece != plan.piece {
-            self.bot_plan = Some(plan);
-            return;
-        }
-        let rot = match plan.rotation.as_str() {
-            "north" | "spawn" | "Spawn" => Rotation::Spawn,
-            "east" | "right" | "Right" => Rotation::Right,
-            "south" | "reverse" | "Reverse" => Rotation::Reverse,
-            "west" | "left" | "Left" => Rotation::Left,
-            _ => Rotation::Spawn,
-        };
-        self.players[1].active.rotation = rot;
-        self.players[1].active.x = plan.x;
-        self.players[1].active.y = plan.y;
-        let blocks = self.players[1].active.blocks();
-        if !self.players[1].board.collision(&self.players[1].active) {
-            let cleared = self.players[1].lock_piece();
-            self.on_piece_locked(1, cleared);
-            self.fall_accum[1] = 0.0;
-        } else {
-            // If invalid, drop to lowest valid height and lock if possible.
-            if let Some(y) = self.players[1].board.lowest_drop_height(plan.x, &blocks) {
-                let mut ap = self.players[1].active.clone();
-                ap.y = y;
-                if !self.players[1].board.collision(&ap) {
-                    self.players[1].active = ap;
-                    let cleared = self.players[1].lock_piece();
-                    self.on_piece_locked(1, cleared);
-                    self.fall_accum[1] = 0.0;
-                    return;
-                }
-            }
-            // Keep pending if still invalid.
-            self.bot_plan = Some(plan);
-        }
-    }
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -962,6 +1038,21 @@ pub struct InputFrame {
     pub rotate_cw: bool,
     pub rotate_180: bool,
     pub hold: bool,
+}
+
+impl Default for InputFrame {
+    fn default() -> Self {
+        InputFrame {
+            left: false,
+            right: false,
+            soft_drop: false,
+            hard_drop: false,
+            rotate_ccw: false,
+            rotate_cw: false,
+            rotate_180: false,
+            hold: false,
+        }
+    }
 }
 
 impl From<InputState> for InputFrame {
@@ -1159,9 +1250,9 @@ struct Versus {
     controllers: [Controller; 2],
     settings: GameSettings,
     bot_driver: BotDriver,
+    use_internal_bot: bool,
     fall_accum: [f32; 2],
     gravity_ms: f32,
-    bot_plan: Option<BotPlan>,
     stats: [PlayerStats; 2],
     last_inputs: [InputState; 2],
     attack_table: AttackTable,
@@ -1178,9 +1269,9 @@ impl Versus {
             controllers: [Controller::new(), Controller::new()],
             settings,
             bot_driver: BotDriver::new(bot_config),
+            use_internal_bot: false, // external bot is expected by default; can be toggled on if desired
             fall_accum: [0.0, 0.0],
             gravity_ms: 1000.0,
-            bot_plan: None,
             stats: [PlayerStats::default(), PlayerStats::default()],
             last_inputs: [InputState::default(), InputState::default()],
             attack_table: default_attack_table(),
@@ -1189,22 +1280,30 @@ impl Versus {
     }
 
     fn tick(&mut self, dt_ms: f32, input0: InputFrame) {
+        if self.players[0].topped_out || self.players[1].topped_out {
+            return;
+        }
         for s in self.stats.iter_mut() {
             s.time_ms += dt_ms;
         }
         self.controllers[0].update_inputs(input0);
         self.stats[0].keys += count_input_edges(&self.last_inputs[0], &input0.clone().into());
         self.last_inputs[0] = input0.into();
-        if let Some(plan) = self.bot_plan.take() {
-            self.apply_plan(plan);
-        } else {
+        if self.use_internal_bot {
             let bot_input = self.bot_driver.update(&mut self.players[1], dt_ms);
             self.controllers[1].update_inputs(bot_input);
-            self.stats[1].keys += count_input_edges(&self.last_inputs[1], &bot_input.clone().into());
+            self.stats[1].keys +=
+                count_input_edges(&self.last_inputs[1], &bot_input.clone().into());
             self.last_inputs[1] = bot_input.into();
+        } else {
+            let idle = InputFrame::default();
+            self.controllers[1].update_inputs(idle);
         }
 
         for idx in 0..2 {
+            if idx == 1 && !self.use_internal_bot {
+                continue;
+            }
             let is_bot = idx == 1;
             let inputs = self.controllers[idx].inputs.clone();
             self.advance_player(idx, dt_ms, inputs, is_bot);
@@ -1217,8 +1316,8 @@ impl Versus {
         }
         let (mut moved, mut rotated) = (false, false);
         if self.controllers[idx].take_hard_drop() {
-            let cleared = self.players[idx].hard_drop();
-            self.on_piece_locked(idx, cleared);
+            let (cleared, t_spin) = self.players[idx].hard_drop();
+            self.on_piece_locked(idx, cleared, t_spin);
             self.fall_accum[idx] = 0.0;
             return;
         }
@@ -1311,8 +1410,8 @@ impl Versus {
         if on_ground {
             piece.lock_timer -= dt_ms;
             if piece.lock_timer <= 0.0 {
-                let cleared = self.players[idx].lock_piece();
-                self.on_piece_locked(idx, cleared);
+                let (cleared, t_spin) = self.players[idx].lock_piece();
+                self.on_piece_locked(idx, cleared, t_spin);
                 self.fall_accum[idx] = 0.0;
             }
         } else {
@@ -1355,7 +1454,7 @@ impl Versus {
         let from = self.players[idx].active.rotation;
         let to = if cw { from.rotate_cw() } else { from.rotate_ccw() };
         let kicks = KickTable::kicks(self.players[idx].active.piece, from, to);
-        for (dx, dy) in kicks {
+        for (_kick_idx, (dx, dy)) in kicks.iter().enumerate() {
             let test = ActivePiece {
                 rotation: to,
                 x: self.players[idx].active.x + dx,
@@ -1364,6 +1463,8 @@ impl Versus {
             };
             if !self.players[idx].board.collision(&test) {
                 self.players[idx].active = test;
+                self.players[idx].last_action_was_t_spin =
+                    self.players[idx].active.piece == Tetromino::T;
                 return true;
             }
         }
@@ -1504,6 +1605,171 @@ impl Versus {
         }
     }
 
+    fn tbp_start(&self, idx: usize) -> Result<frontend_msg::Start, String> {
+        let player = self.players.get(idx).ok_or("invalid player index")?;
+        let mut board_rows: Vec<Vec<Option<char>>> = Vec::with_capacity(TOTAL_HEIGHT);
+        for y in 0..TOTAL_HEIGHT {
+            let mut row = Vec::with_capacity(WIDTH);
+            for x in 0..WIDTH {
+                row.push(color_to_cell_char(player.board.cells[y][x]));
+            }
+            board_rows.push(row);
+        }
+
+        let mut queue: Vec<MaybeUnknown<tbp_data::Piece>> = Vec::new();
+        queue.push(MaybeUnknown::Known(player.active.piece.into()));
+        queue.extend(
+            player
+                .queue
+                .iter()
+                .copied()
+                .map(|p| MaybeUnknown::Known(p.into())),
+        );
+
+        let randomizer = match player.randomizer_kind {
+            RandomizerKind::SevenBag | RandomizerKind::LoveTris => {
+                if let Some(bag) = player.randomizer.bag_state() {
+                    tbp_randomizer::RandomizerState::SevenBag(tbp_randomizer::SevenBag::new(
+                        bag.into_iter().map(Into::into).collect(),
+                    ))
+                } else {
+                    tbp_randomizer::RandomizerState::SevenBag(tbp_randomizer::SevenBag::new(
+                        Vec::new(),
+                    ))
+                }
+            }
+            _ => tbp_randomizer::RandomizerState::Unknown,
+        };
+
+        let mut start = frontend_msg::Start::new(
+            player.hold.map(|p| MaybeUnknown::Known(p.into())),
+            queue,
+            player.combo,
+            player.back_to_back,
+            board_rows,
+        );
+        start.randomizer = randomizer;
+        Ok(start)
+    }
+
+    fn apply_tbp_move(
+        &mut self,
+        idx: usize,
+        mv: tbp_data::Move,
+    ) -> Result<AppliedMoveResult, String> {
+        if idx >= self.players.len() {
+            return Err("invalid player index".into());
+        }
+        if self.players[idx].topped_out {
+            return Err("player topped out".into());
+        }
+        let desired_piece: Tetromino = mv
+            .location
+            .kind
+            .clone()
+            .known()
+            .ok_or("unknown piece in move")?
+            .into();
+        {
+            let player = &mut self.players[idx];
+            if desired_piece != player.active.piece {
+                let queue_front = player.queue.get(0).copied();
+                if let Some(hold) = player.hold {
+                    if hold == desired_piece {
+                        let previous = player.active.piece;
+                        player.active = ActivePiece::new(desired_piece);
+                        player.hold = Some(previous);
+                        player.held_on_turn = true;
+                    } else if queue_front == Some(desired_piece) && !player.held_on_turn {
+                        // Bot used hold to skip to the next piece.
+                        player.hold = Some(player.active.piece);
+                        player.active = ActivePiece::new(desired_piece);
+                        player.queue.remove(0);
+                        player.refill_queue();
+                        player.held_on_turn = true;
+                    } else {
+                        return Err("move piece not available (not current or held)".into());
+                    }
+                } else if queue_front == Some(desired_piece) && !player.held_on_turn {
+                    // Hold was empty; bot is effectively holding current and using next.
+                    player.hold = Some(player.active.piece);
+                    player.active = ActivePiece::new(desired_piece);
+                    player.queue.remove(0);
+                    player.refill_queue();
+                    player.held_on_turn = true;
+                } else {
+                    return Err("move piece not available (hold empty)".into());
+                }
+            }
+
+            let orientation = mv
+                .location
+                .orientation
+                .clone()
+                .known()
+                .ok_or("unknown orientation in move")?;
+            player.active.rotation = from_tbp_orientation(orientation);
+            player.active.x = mv.location.x as i32;
+            player.active.y = mv.location.y as i32;
+            if player.active.piece == Tetromino::I
+                && (player.active.rotation == Rotation::Right
+                    || player.active.rotation == Rotation::Reverse)
+            {
+                // Our I vertical column is shifted +1 relative to TBP coords; align to TBP pivot.
+                player.active.x -= 1;
+            }
+            if player.board.collision(&player.active) {
+                // If the suggested y collides, try dropping to the lowest legal height for this x/rotation.
+                let shape = player.active.blocks();
+                if let Some(drop_y) = player.board.lowest_drop_height(player.active.x, &shape) {
+                    player.active.y = drop_y;
+                    if player.board.collision(&player.active) {
+                        return Err("placement collides with board".into());
+                    }
+                } else {
+                    return Err("placement collides with board".into());
+                }
+            }
+        }
+
+        let (cleared, t_spin);
+        {
+            let player = &mut self.players[idx];
+            let res = player.lock_piece();
+            cleared = res.0;
+            t_spin = res.1;
+        }
+        self.on_piece_locked(idx, cleared, t_spin);
+        self.fall_accum[idx] = 0.0;
+
+        let (topped_out, active_piece, new_queue_piece, combo, back_to_back) = {
+            let player = &self.players[idx];
+            (
+                player.topped_out,
+                if player.topped_out {
+                    None
+                } else {
+                    Some(player.active.piece.into())
+                },
+                player
+                    .last_refill_added
+                    .map(Into::into)
+                    .or_else(|| player.queue.last().copied().map(Into::into)),
+                player.combo,
+                player.back_to_back,
+            )
+        };
+
+        Ok(AppliedMoveResult {
+            lines_cleared: cleared,
+            topped_out,
+            active_piece,
+            new_queue_piece,
+            combo,
+            back_to_back,
+        })
+    }
+
     fn set_randomizer(&mut self, player: usize, kind: RandomizerKind) {
         if let Some(p) = self.players.get_mut(player) {
             p.set_randomizer(kind);
@@ -1515,18 +1781,6 @@ impl Player {
     fn cells(&self, row: usize, col: usize) -> u8 {
         self.board.cells[row][col]
     }
-}
-
-#[derive(Serialize)]
-pub struct TbpFrame {
-    pub board: Vec<u8>,
-    pub active: Vec<Point>,
-    pub active_piece: u8,
-    pub active_rotation: String,
-    pub hold: Option<u8>,
-    pub next: Vec<u8>,
-    pub attack_table: AttackTable,
-    pub combo_table: ComboTable,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -1568,10 +1822,10 @@ fn default_attack_table() -> AttackTable {
         _2_lines_double: 1,
         _3_lines_triple: 2,
         _4_lines: 4,
-        t_spin_double: 4,
-        t_spin_triple: 6,
-        t_spin_single: 2,
-        t_spin_mini_single: 0,
+        t_spin_double: 4,      // send 4 lines
+        t_spin_triple: 6,      // send 6 lines
+        t_spin_single: 2,      // send 2 lines
+        t_spin_mini_single: 0, // unchanged
         perfect_clear: 10,
         back_to_back_bonus: 1,
     }
@@ -1592,25 +1846,6 @@ fn default_combo_table() -> ComboTable {
         c10: 4,
         c11: 4,
         c12_plus: 5,
-    }
-}
-
-fn tbp_frame_for(player: &Player) -> TbpFrame {
-    let mut board = vec![0u8; WIDTH * 40];
-    for row in 0..TOTAL_HEIGHT.min(40) {
-        for x in 0..WIDTH {
-            board[row * WIDTH + x] = player.board.cells[row][x];
-        }
-    }
-    TbpFrame {
-        board,
-        active: player.active.blocks().to_vec(),
-        active_piece: player.active.piece.color_id(),
-        active_rotation: format!("{:?}", player.active.rotation).to_lowercase(),
-        hold: player.hold.map(|p| p.color_id()),
-        next: player.queue.iter().map(|p| p.color_id()).collect(),
-        attack_table: default_attack_table(),
-        combo_table: default_combo_table(),
     }
 }
 
@@ -1706,20 +1941,41 @@ impl GameClient {
         Ok(())
     }
 
-    #[wasm_bindgen(js_name = tbpState)]
-    pub fn tbp_state(&self, player: usize) -> Result<JsValue, JsValue> {
-        let player = self
-            .versus
-            .players
-            .get(player)
-            .ok_or_else(|| JsValue::from_str("player out of range"))?;
-        to_value(&tbp_frame_for(player)).map_err(|e| e.into())
+    #[wasm_bindgen(js_name = setInternalBotEnabled)]
+    pub fn set_internal_bot_enabled(&mut self, enabled: bool) {
+        self.versus.use_internal_bot = enabled;
+        if enabled {
+            log("[bot] internal bot enabled (fallback)");
+        } else {
+            log("[bot] internal bot disabled (awaiting external plans)");
+        }
     }
 
-    #[wasm_bindgen(js_name = setBotPlan)]
-    pub fn set_bot_plan(&mut self, plan: JsValue) -> Result<(), JsValue> {
-        let parsed: BotPlan = from_value(plan)?;
-        self.versus.bot_plan = Some(parsed);
-        Ok(())
+    #[wasm_bindgen(js_name = tbpStart)]
+    pub fn tbp_start(&self, player: usize) -> Result<JsValue, JsValue> {
+        let start = self
+            .versus
+            .tbp_start(player)
+            .map_err(|e| JsValue::from_str(&e))?;
+        to_value(&start).map_err(|e| e.into())
+    }
+
+    #[wasm_bindgen(js_name = tbpApplyMove)]
+    pub fn tbp_apply_move(&mut self, player: usize, mv: JsValue) -> Result<JsValue, JsValue> {
+        let parsed: tbp_data::Move = from_value(mv)?;
+        let result = self
+            .versus
+            .apply_tbp_move(player, parsed)
+            .map_err(|e| JsValue::from_str(&e))?;
+        to_value(&result).map_err(|e| e.into())
+    }
+
+    #[wasm_bindgen(js_name = tbpStartJson)]
+    pub fn tbp_start_json(&self, player: usize) -> Result<String, JsValue> {
+        let start = self
+            .versus
+            .tbp_start(player)
+            .map_err(|e| JsValue::from_str(&e))?;
+        serde_json::to_string(&start).map_err(|e| JsValue::from_str(&e.to_string()))
     }
 }

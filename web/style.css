@@ -276,6 +276,20 @@ input[type="range"] {
     letter-spacing: 0.02em;
 }
 
+.ghost-btn {
+    background: transparent;
+    border: 1px solid var(--grid);
+    color: var(--text);
+    padding: 6px 10px;
+    border-radius: 8px;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.ghost-btn:hover {
+    background: var(--tile);
+}
+
 .status-dot {
     width: 10px;
     height: 10px;
