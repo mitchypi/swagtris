@@ -210,6 +210,7 @@ pub enum GridStyle {
 pub enum RandomizerKind {
     TrueRandom,
     SevenBag,
+    FiveBag,
     SinglePiece { piece: Tetromino },
     LoveTris,
 }
@@ -262,6 +263,38 @@ impl SevenBag {
 }
 
 impl Randomizer for SevenBag {
+    fn next(&mut self, _board: &Board) -> Tetromino {
+        if self.bag.is_empty() {
+            self.refill();
+        }
+        self.bag.pop().unwrap()
+    }
+
+    fn bag_state(&self) -> Option<Vec<Tetromino>> {
+        Some(self.bag.clone())
+    }
+}
+
+struct FiveBag {
+    bag: Vec<Tetromino>,
+}
+
+impl FiveBag {
+    fn new() -> Self {
+        Self { bag: Vec::new() }
+    }
+
+    fn refill(&mut self) {
+        self.bag = Tetromino::all()
+            .iter()
+            .copied()
+            .filter(|p| *p != Tetromino::S && *p != Tetromino::Z)
+            .collect();
+        self.bag.shuffle(&mut thread_rng());
+    }
+}
+
+impl Randomizer for FiveBag {
     fn next(&mut self, _board: &Board) -> Tetromino {
         if self.bag.is_empty() {
             self.refill();
@@ -338,6 +371,7 @@ fn randomizer_from_kind(kind: RandomizerKind) -> Box<dyn Randomizer> {
     match kind {
         RandomizerKind::TrueRandom => Box::new(TrueRandom),
         RandomizerKind::SevenBag => Box::new(SevenBag::new()),
+        RandomizerKind::FiveBag => Box::new(FiveBag::new()),
         RandomizerKind::SinglePiece { piece } => Box::new(SinglePiece { piece }),
         RandomizerKind::LoveTris => Box::new(LoveTris::new()),
     }

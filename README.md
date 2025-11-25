@@ -1,7 +1,7 @@
 ![Gameplay clip](clip.gif)
 
 # Rust + WebAssembly Tetris (1v1 vs coldclear2)
-Play against ColdClear2 with cool randomizers such as select a piece and lovetris (which is basically the reverse of Hatetris).
+My motivation for building this was having a platform to play against a tetris bot with wacky randomizers such as 5-bag which is everything but S and Z pieces.
 100% guideline compatible, with all kicks and SRS.
 ## Building
 1) Install the wasm target and wasm-pack if you have not yet:

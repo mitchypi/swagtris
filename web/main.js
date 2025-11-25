@@ -317,6 +317,9 @@ function buildRandomizer(kindSelectId, pieceSelectId) {
   if (kind === "SinglePiece") {
     return { SinglePiece: { piece } };
   }
+  if (kind === "FiveBag") {
+    return "FiveBag";
+  }
   return kind;
 }
 
