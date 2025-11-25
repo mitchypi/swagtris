@@ -29,3 +29,5 @@ cargo run --bin bot_bridge -- --listen 127.0.0.1:9000 --bot-path cold-clear-2/ta
 - DAS/ARR values are stored in settings and surfaced in the UI; the movement pipeline is frame-based and can be extended from `src/lib.rs` if you want stricter input timing.
 - Colors follow the guideline palette. Grid visibility options are rendered in `web/main.js`.
 - If you switch randomizers or PPS, click **Apply + Restart** to rebuild the session with the new configuration.
+
+![Gameplay clip](clip.gif)
