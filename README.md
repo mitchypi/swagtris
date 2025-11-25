@@ -1,3 +1,5 @@
+![Gameplay clip](clip.gif)
+
 # Rust + WebAssembly Tetris (1v1 vs coldclear2)
 Play against ColdClear2 with cool randomizers such as select a piece and lovetris (which is basically the reverse of Hatetris)
 ## Building
@@ -30,4 +32,4 @@ cargo run --bin bot_bridge -- --listen 127.0.0.1:9000 --bot-path cold-clear-2/ta
 - Colors follow the guideline palette. Grid visibility options are rendered in `web/main.js`.
 - If you switch randomizers or PPS, click **Apply + Restart** to rebuild the session with the new configuration.
 
-![Gameplay clip](clip.gif)
+
