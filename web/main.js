@@ -471,7 +471,7 @@ function drawBoard(canvas, player, gridStyle, gameOver = false, isWinner = false
 
   if (player.ghost) {
     ctx.globalAlpha = 0.35;
-    drawBlocks(player.ghost, activeColor);
+    drawBlocks(player.ghost, COLORS[player.active_color || 7] || "rgba(255,255,255,0.35)");
     ctx.globalAlpha = 1.0;
   }
   const activeColor = COLORS[player.active_color || 7] || "rgba(255,255,255,0.35)";
