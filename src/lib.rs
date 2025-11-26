@@ -387,6 +387,7 @@ pub struct InputState {
     pub rotate_cw: bool,
     pub rotate_180: bool,
     pub hold: bool,
+    pub discard: bool,
 }
 
 impl Default for InputState {
@@ -400,6 +401,7 @@ impl Default for InputState {
             rotate_cw: false,
             rotate_180: false,
             hold: false,
+            discard: false,
         }
     }
 }
@@ -415,6 +417,7 @@ impl From<InputFrame> for InputState {
             rotate_cw: value.rotate_cw,
             rotate_180: value.rotate_180,
             hold: value.hold,
+            discard: value.discard,
         }
     }
 }
@@ -583,6 +586,12 @@ struct Board {
     cells: [[u8; WIDTH]; TOTAL_HEIGHT],
 }
 
+#[derive(Clone)]
+struct GarbageBatch {
+    lines: u32,
+    hole: usize,
+}
+
 impl Board {
     fn new() -> Self {
         Self {
@@ -700,18 +709,16 @@ impl Board {
         None
     }
 
-    fn add_garbage(&mut self, lines: u32) -> bool {
+    fn add_garbage(&mut self, lines: u32, hole: usize) -> bool {
         if lines == 0 {
             return false;
         }
-        let mut rng = thread_rng();
-        let hole = rng.gen_range(0..WIDTH);
         for _ in 0..lines {
             for y in (1..TOTAL_HEIGHT).rev() {
                 self.cells[y] = self.cells[y - 1];
             }
             let mut row = [8u8; WIDTH];
-            row[hole] = 0;
+            row[hole.min(WIDTH - 1)] = 0;
             self.cells[0] = row;
         }
         self.max_height() > VISIBLE_HEIGHT
@@ -799,6 +806,12 @@ pub struct PlayerStatsView {
     pub pending_garbage: u32,
 }
 
+#[derive(Serialize, Clone)]
+pub struct LineClearSummary {
+    pub time_ms: f32,
+    pub description: String,
+}
+
 #[derive(Serialize)]
 pub struct PlayerView {
     pub field: Vec<u8>,
@@ -814,6 +827,7 @@ pub struct PlayerView {
     pub next_blocks: Vec<Vec<Point>>,
     pub topped_out: bool,
     pub stats: PlayerStatsView,
+    pub summary: Vec<LineClearSummary>,
 }
 
 #[derive(Serialize)]
@@ -870,14 +884,16 @@ struct Player {
     randomizer: Box<dyn Randomizer>,
     randomizer_kind: RandomizerKind,
     topped_out: bool,
-    pending_garbage: u32,
+    top_out_on_spawn: bool,
+    pending_garbage: Vec<GarbageBatch>,
     combo: u32,
     back_to_back: bool,
     last_refill_added: Option<Tetromino>,
+    recent_events: Vec<LineClearSummary>,
 }
 
 impl Player {
-    fn new(randomizer_kind: RandomizerKind) -> Self {
+    fn new(randomizer_kind: RandomizerKind, top_out_on_spawn: bool) -> Self {
         let mut randomizer = randomizer_from_kind(randomizer_kind.clone());
         let mut queue = Vec::new();
         for _ in 0..6 {
@@ -894,10 +910,12 @@ impl Player {
             randomizer,
             randomizer_kind,
             topped_out: false,
-            pending_garbage: 0,
+            top_out_on_spawn,
+            pending_garbage: Vec::new(),
             combo: 0,
             back_to_back: false,
             last_refill_added: None,
+            recent_events: Vec::new(),
         }
     }
 
@@ -925,13 +943,13 @@ impl Player {
         let next_piece = self.queue.remove(0);
         self.refill_queue();
         self.active = ActivePiece::new(next_piece);
-        if self.board.collision(&self.active) {
+        if self.top_out_on_spawn && self.board.collision(&self.active) {
             self.topped_out = true;
             log("Top out on spawn");
         }
     }
 
-    fn hard_drop(&mut self) -> (usize, bool) {
+    fn hard_drop(&mut self) -> (usize, bool, bool) {
         let mut landing_y = self.active.y;
         loop {
             let test = ActivePiece {
@@ -951,20 +969,28 @@ impl Player {
         self.lock_piece()
     }
 
-    fn lock_piece(&mut self) -> (usize, bool) {
+    fn lock_piece(&mut self) -> (usize, bool, bool) {
         let color = self.active.piece.color_id();
         let blocks = self.active.blocks();
+        let mut overflow = false;
         self.board
             .lock_piece(self.active.x, self.active.y, &blocks, color);
         let cleared = self.board.clear_lines();
+        for b in blocks {
+            let py = self.active.y + b.y as i32;
+            if py >= VISIBLE_HEIGHT as i32 || py < 0 {
+                overflow = true;
+                break;
+            }
+        }
         let was_t_spin = self.last_action_was_t_spin && self.active.piece == Tetromino::T && cleared > 0;
         self.spawn_next();
-        (cleared, was_t_spin)
+        (cleared, was_t_spin, overflow)
     }
 }
 
 impl Versus {
-    fn on_piece_locked(&mut self, idx: usize, cleared: usize, is_t_spin: bool) {
+    fn on_piece_locked(&mut self, idx: usize, cleared: usize, is_t_spin: bool, overflow: bool) {
         // Work with locals to avoid aliasing self borrows.
         let attack_out: u32;
         let mut apply_garbage = false;
@@ -1015,48 +1041,106 @@ impl Versus {
             } as u32;
             attack = attack.saturating_add(combo_bonus);
 
-            if player.back_to_back && cleared >= 4 {
-                attack = attack.saturating_add(self.attack_table.back_to_back_bonus as u32);
+            let difficult = cleared >= 4 || (is_t_spin && cleared > 0);
+            let mut b2b_bonus = 0;
+            if player.back_to_back && difficult {
+                b2b_bonus = self.attack_table.back_to_back_bonus as u32;
+                attack = attack.saturating_add(b2b_bonus);
             }
+            let mut pc_bonus = 0;
             if perfect_clear {
-                attack = attack.saturating_add(self.attack_table.perfect_clear as u32);
+                pc_bonus = self.attack_table.perfect_clear as u32;
+                attack = attack.saturating_add(pc_bonus);
             }
             let attack_before_cancel = attack;
-            player.back_to_back = cleared >= 4;
+            player.back_to_back = difficult;
 
             if attack > 0 {
                 let pending = &mut player.pending_garbage;
-                if *pending >= attack {
-                    *pending -= attack;
-                    attack = 0;
-                } else {
-                    attack -= *pending;
-                    *pending = 0;
+                while attack > 0 && !pending.is_empty() {
+                    if let Some(front) = pending.first_mut() {
+                        if attack >= front.lines {
+                        attack -= front.lines;
+                        pending.remove(0);
+                    } else {
+                        front.lines -= attack;
+                        attack = 0;
+                    }
                 }
             }
+        }
 
             attack_out = attack;
             stats.attack = stats.attack.saturating_add(attack_before_cancel);
+
+            // Summaries: record any line clear (attack or not).
+            if cleared > 0 {
+                let base_label = if is_t_spin && cleared > 0 {
+                    match cleared {
+                        1 => "T-Spin Single",
+                        2 => "T-Spin Double",
+                        _ => "T-Spin Triple",
+                    }
+                } else {
+                    match cleared {
+                        1 => "Single",
+                        2 => "Double",
+                        3 => "Triple",
+                        _ => "Tetris",
+                    }
+                };
+                let mut parts = Vec::new();
+                parts.push(format!("+{} {}", attack_before_cancel, base_label));
+                if combo_bonus > 0 {
+                    parts.push(format!("+{} combo bonus", combo_bonus));
+                }
+                if b2b_bonus > 0 {
+                    parts.push(format!("+{} B2B", b2b_bonus));
+                }
+                if pc_bonus > 0 {
+                    parts.push(format!("+{} perfect clear", pc_bonus));
+                }
+                let desc = parts.join(", ");
+                let time_sec = stats.time_ms / 1000.0;
+                player.recent_events.push(LineClearSummary {
+                    time_ms: time_sec,
+                    description: desc,
+                });
+                if player.recent_events.len() > 20 {
+                    let drop = player.recent_events.len() - 20;
+                    player.recent_events.drain(0..drop);
+                }
+            }
         }
 
         // Apply any blocked garbage now that combo is broken.
         if apply_garbage {
-            let pending = self.players[idx].pending_garbage;
-            if pending > 0 {
-                let overflow = self.players[idx].board.add_garbage(pending);
-                if overflow {
-                    self.players[idx].topped_out = true;
+            let pending_batches = std::mem::take(&mut self.players[idx].pending_garbage);
+            let mut overflow = false;
+            for batch in pending_batches {
+                if self.players[idx].board.add_garbage(batch.lines, batch.hole) {
+                    overflow = true;
                 }
-                self.players[idx].pending_garbage = 0;
+            }
+            if overflow {
+                self.players[idx].topped_out = true;
             }
         }
 
         // Deliver outgoing attack after previous borrows are released.
         if attack_out > 0 {
             let opp = if idx == 0 { 1 } else { 0 };
-            self.players[opp].pending_garbage =
-                self.players[opp].pending_garbage.saturating_add(attack_out);
+            let mut rng = thread_rng();
+            let hole = rng.gen_range(0..WIDTH);
+            self.players[opp].pending_garbage.push(GarbageBatch {
+                lines: attack_out,
+                hole,
+            });
             self.stats[idx].lines_sent = self.stats[idx].lines_sent.saturating_add(attack_out);
+        }
+
+        if overflow && idx == 0 {
+            self.players[idx].topped_out = true;
         }
     }
 
@@ -1072,6 +1156,7 @@ pub struct InputFrame {
     pub rotate_cw: bool,
     pub rotate_180: bool,
     pub hold: bool,
+    pub discard: bool,
 }
 
 impl Default for InputFrame {
@@ -1085,6 +1170,7 @@ impl Default for InputFrame {
             rotate_cw: false,
             rotate_180: false,
             hold: false,
+            discard: false,
         }
     }
 }
@@ -1100,6 +1186,7 @@ impl From<InputState> for InputFrame {
             rotate_cw: value.rotate_cw,
             rotate_180: value.rotate_180,
             hold: value.hold,
+            discard: value.discard,
         }
     }
 }
@@ -1115,6 +1202,7 @@ fn count_input_edges(prev: &InputState, curr: &InputState) -> u32 {
         (prev.rotate_cw, curr.rotate_cw),
         (prev.rotate_180, curr.rotate_180),
         (prev.hold, curr.hold),
+        (prev.discard, curr.discard),
     ];
     for (p, c) in fields {
         if !p && c {
@@ -1134,6 +1222,7 @@ struct Controller {
     last_rotate_cw: bool,
     last_rotate_ccw: bool,
     last_rotate_180: bool,
+    last_discard: bool,
 }
 
 impl Controller {
@@ -1148,6 +1237,7 @@ impl Controller {
             last_rotate_cw: false,
             last_rotate_ccw: false,
             last_rotate_180: false,
+            last_discard: false,
         }
     }
 
@@ -1160,6 +1250,7 @@ impl Controller {
         self.inputs.rotate_cw = incoming.rotate_cw;
         self.inputs.rotate_180 = incoming.rotate_180;
         self.inputs.hold = incoming.hold;
+        self.inputs.discard = incoming.discard;
     }
 
     fn take_hard_drop(&mut self) -> bool {
@@ -1183,6 +1274,12 @@ impl Controller {
     fn take_rotate_180(&mut self) -> bool {
         let fire = self.inputs.rotate_180 && !self.last_rotate_180;
         self.last_rotate_180 = self.inputs.rotate_180;
+        fire
+    }
+
+    fn take_discard(&mut self) -> bool {
+        let fire = self.inputs.discard && !self.last_discard;
+        self.last_discard = self.inputs.discard;
         fire
     }
 }
@@ -1220,6 +1317,7 @@ impl BotDriver {
             rotate_cw: false,
             rotate_180: false,
             hold: false,
+            discard: false,
         };
         self.think_timer += dt_ms;
         let piece_time = 1000.0 / self.config.pps.max(0.1);
@@ -1265,6 +1363,7 @@ fn find_safe_column(board: &Board, piece: Tetromino) -> Option<InputFrame> {
             rotate_cw: false,
             rotate_180: false,
             hold: false,
+            discard: false,
         };
         if col < 4 {
             frame.left = true;
@@ -1297,8 +1396,8 @@ impl Versus {
     fn new(settings: GameSettings, bot_config: BotConfig, randomizers: [RandomizerKind; 2]) -> Self {
         Self {
             players: [
-                Player::new(randomizers[0].clone()),
-                Player::new(randomizers[1].clone()),
+                Player::new(randomizers[0].clone(), false),
+                Player::new(randomizers[1].clone(), true),
             ],
             controllers: [Controller::new(), Controller::new()],
             settings,
@@ -1350,8 +1449,8 @@ impl Versus {
         }
         let (mut moved, mut rotated) = (false, false);
         if self.controllers[idx].take_hard_drop() {
-            let (cleared, t_spin) = self.players[idx].hard_drop();
-            self.on_piece_locked(idx, cleared, t_spin);
+            let (cleared, t_spin, overflow) = self.players[idx].hard_drop();
+            self.on_piece_locked(idx, cleared, t_spin, overflow);
             self.fall_accum[idx] = 0.0;
             return;
         }
@@ -1363,6 +1462,10 @@ impl Versus {
         }
         if self.controllers[idx].take_rotate_180() {
             rotated |= self.try_rotate(idx, true, true);
+        }
+        if self.controllers[idx].take_discard() {
+            self.discard_piece(idx);
+            return;
         }
         let dir = match (inputs.left, inputs.right) {
             (true, false) => -1,
@@ -1444,8 +1547,8 @@ impl Versus {
         if on_ground {
             piece.lock_timer -= dt_ms;
             if piece.lock_timer <= 0.0 {
-                let (cleared, t_spin) = self.players[idx].lock_piece();
-                self.on_piece_locked(idx, cleared, t_spin);
+                let (cleared, t_spin, overflow) = self.players[idx].lock_piece();
+                self.on_piece_locked(idx, cleared, t_spin, overflow);
                 self.fall_accum[idx] = 0.0;
             }
         } else {
@@ -1518,6 +1621,32 @@ impl Versus {
             self.players[idx].spawn_next();
         }
         self.players[idx].held_on_turn = true;
+    }
+
+    fn discard_piece(&mut self, idx: usize) {
+        let player = &mut self.players[idx];
+        if player.topped_out {
+            return;
+        }
+        player.combo = 0;
+        player.back_to_back = false;
+        // Apply any pending garbage now that the chain is broken.
+        if !player.pending_garbage.is_empty() {
+            let batches = std::mem::take(&mut player.pending_garbage);
+            let mut overflow = false;
+            for batch in batches {
+                if player.board.add_garbage(batch.lines, batch.hole) {
+                    overflow = true;
+                }
+            }
+            if overflow {
+                player.topped_out = true;
+                return;
+            }
+        }
+        player.spawn_next();
+        self.stats[idx].pieces = self.stats[idx].pieces.saturating_add(1);
+        self.fall_accum[idx] = 0.0;
     }
 
     fn ghost(&self, idx: usize) -> Vec<Point> {
@@ -1629,8 +1758,13 @@ impl Versus {
                     pps,
                     kpp,
                     lines_sent: stats.lines_sent,
-                    pending_garbage: self.players[idx].pending_garbage,
+                    pending_garbage: self.players[idx]
+                        .pending_garbage
+                        .iter()
+                        .map(|b| b.lines)
+                        .sum(),
                 },
+                summary: self.players[idx].recent_events.clone(),
             });
         }
         FrameView {
@@ -1773,7 +1907,7 @@ impl Versus {
             cleared = res.0;
             t_spin = res.1;
         }
-        self.on_piece_locked(idx, cleared, t_spin);
+        self.on_piece_locked(idx, cleared, t_spin, false);
         self.fall_accum[idx] = 0.0;
 
         let (topped_out, active_piece, new_queue_piece, combo, back_to_back) = {
@@ -1964,6 +2098,7 @@ impl GameClient {
             rotate_cw: parsed.rotate_cw,
             rotate_180: parsed.rotate_180,
             hold: parsed.hold,
+            discard: parsed.discard,
         };
         Ok(())
     }

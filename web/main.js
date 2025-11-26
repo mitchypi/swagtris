@@ -27,6 +27,7 @@ let inputState = {
   rotate_cw: false,
   rotate_180: false,
   hold: false,
+  discard: false,
 };
 let bindings = loadControls();
 let waitingForBind = null;
@@ -41,6 +42,8 @@ let botLog = [];
 let suggestTimer = null;
 let gameEnded = false;
 let sentStopThisGame = false;
+let summaryLogs = [[], []];
+let lastStatsSnap = [null, null];
 
 const actions = [
   { id: "left", label: "Move Left", field: "move_left" },
@@ -51,6 +54,7 @@ const actions = [
   { id: "rotate_cw", label: "Rotate Right", field: "rotate_right" },
   { id: "rotate_180", label: "Rotate 180", field: "rotate_180" },
   { id: "hold", label: "Hold", field: "hold" },
+  { id: "discard", label: "Discard", field: "discard" },
 ];
 
 function setBotStatus(state, text = "") {
@@ -249,6 +253,7 @@ function loadControls() {
       rotate_cw: "ArrowUp",
       rotate_180: "KeyA",
       hold: "KeyC",
+      discard: "KeyX",
     }
   );
 }
@@ -578,7 +583,50 @@ function updateStats(players, dt) {
     if (ppsEl) ppsEl.textContent = formatNumber(stats.pps || 0, 2);
     if (kppEl) kppEl.textContent = formatNumber(stats.kpp || 0, 2);
     if (linesEl) linesEl.textContent = `${stats.lines_sent ?? 0}`;
+
+    // Summary log updates
+    const prev = lastStatsSnap[i];
+    if (prev) {
+      const deltaLines = (stats.lines_sent || 0) - (prev.lines_sent || 0);
+      const deltaAttack = (stats.attack || 0) - (prev.attack || 0);
+      if (deltaLines > 0 || deltaAttack > 0) {
+        const timeSec = (stats.time_ms || 0) / 1000;
+        const msgParts = [];
+        if (deltaLines > 0) msgParts.push(`+${deltaLines} lines`);
+        if (deltaAttack > 0) msgParts.push(`attack +${deltaAttack}`);
+        summaryLogs[i].push({ t: timeSec, msg: msgParts.join(" ") });
+        if (summaryLogs[i].length > 30) {
+          summaryLogs[i].shift();
+        }
+        renderSummaryLogs();
+      }
+    }
+    lastStatsSnap[i] = { ...stats };
   }
+}
+
+function renderSummaryLogs() {
+  const ids = ["summary-player", "summary-bot"];
+  ids.forEach((id, idx) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.innerHTML = "";
+    const logs = summaryLogs[idx];
+    for (let i = logs.length - 1; i >= 0; i--) {
+      const entry = logs[i];
+      const row = document.createElement("div");
+      row.className = "entry";
+      const time = document.createElement("span");
+      time.className = "time";
+      time.textContent = `${entry.t.toFixed(1)}s`;
+      const msg = document.createElement("span");
+      msg.className = "delta";
+      msg.textContent = entry.msg;
+      row.appendChild(time);
+      row.appendChild(msg);
+      el.appendChild(row);
+    }
+  });
 }
 
 async function main() {
