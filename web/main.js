@@ -55,6 +55,7 @@ const actions = [
   { id: "rotate_180", label: "Rotate 180", field: "rotate_180" },
   { id: "hold", label: "Hold", field: "hold" },
   { id: "discard", label: "Discard", field: "discard" },
+  { id: "force_i", label: "Force I Piece", field: "force_i" },
 ];
 
 function setBotStatus(state, text = "") {
@@ -143,6 +144,7 @@ function sendBotStart() {
     sendBot(payload);
     botPendingStart = false;
     awaitingSuggestion = false;
+    setBotStatus("connected");
     requestBotSuggestion();
   } catch (err) {
     console.error("Failed to build TBP start:", err);
@@ -254,6 +256,7 @@ function loadControls() {
       rotate_180: "KeyA",
       hold: "KeyC",
       discard: "KeyX",
+      force_i: "KeyV",
     }
   );
 }
@@ -358,6 +361,7 @@ function createGameFromUI() {
   gameEnded = false;
   sentStopThisGame = false;
   awaitingSuggestion = false;
+  setBotStatus(botReady ? "connecting" : "connecting", "Restarting…");
   if (suggestTimer) {
     clearTimeout(suggestTimer);
     suggestTimer = null;
@@ -583,25 +587,6 @@ function updateStats(players, dt) {
     if (ppsEl) ppsEl.textContent = formatNumber(stats.pps || 0, 2);
     if (kppEl) kppEl.textContent = formatNumber(stats.kpp || 0, 2);
     if (linesEl) linesEl.textContent = `${stats.lines_sent ?? 0}`;
-
-    // Summary log updates
-    const prev = lastStatsSnap[i];
-    if (prev) {
-      const deltaLines = (stats.lines_sent || 0) - (prev.lines_sent || 0);
-      const deltaAttack = (stats.attack || 0) - (prev.attack || 0);
-      if (deltaLines > 0 || deltaAttack > 0) {
-        const timeSec = (stats.time_ms || 0) / 1000;
-        const msgParts = [];
-        if (deltaLines > 0) msgParts.push(`+${deltaLines} lines`);
-        if (deltaAttack > 0) msgParts.push(`attack +${deltaAttack}`);
-        summaryLogs[i].push({ t: timeSec, msg: msgParts.join(" ") });
-        if (summaryLogs[i].length > 30) {
-          summaryLogs[i].shift();
-        }
-        renderSummaryLogs();
-      }
-    }
-    lastStatsSnap[i] = { ...stats };
   }
 }
 
@@ -611,17 +596,17 @@ function renderSummaryLogs() {
     const el = document.getElementById(id);
     if (!el) return;
     el.innerHTML = "";
-    const logs = summaryLogs[idx];
+    const logs = (window.lastView?.players?.[idx]?.summary) || [];
     for (let i = logs.length - 1; i >= 0; i--) {
       const entry = logs[i];
       const row = document.createElement("div");
       row.className = "entry";
       const time = document.createElement("span");
       time.className = "time";
-      time.textContent = `${entry.t.toFixed(1)}s`;
+      time.textContent = `${(entry.time_ms || 0).toFixed(1)}s`;
       const msg = document.createElement("span");
       msg.className = "delta";
-      msg.textContent = entry.msg;
+      msg.textContent = entry.description || "";
       row.appendChild(time);
       row.appendChild(msg);
       el.appendChild(row);
@@ -672,10 +657,13 @@ async function main() {
     const dt = ts - last;
     last = ts;
     if (game) {
-      game.setInput(inputState);
+      // Ensure all fields are present for WASM deserialization.
+      const sendState = { force_i: false, ...inputState };
+      game.setInput(sendState);
       const frame = game.tick(dt);
       const view = frame;
       if (view && view.players) {
+        window.lastView = view;
         const gameOver = view.players.some((p) => p.topped_out);
         const playerWins = gameOver && !view.players[0].topped_out && view.players[1].topped_out;
         const botWins = gameOver && !view.players[1].topped_out && view.players[0].topped_out;
@@ -713,6 +701,7 @@ async function main() {
         drawNext(nextPlayer, view.players[0], previewCount);
         drawNext(nextBot, view.players[1], previewCount);
         updateStats(view.players, dt);
+        renderSummaryLogs();
       }
     }
     requestAnimationFrame(loop);

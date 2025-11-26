@@ -388,6 +388,7 @@ pub struct InputState {
     pub rotate_180: bool,
     pub hold: bool,
     pub discard: bool,
+    pub force_i: bool,
 }
 
 impl Default for InputState {
@@ -402,6 +403,7 @@ impl Default for InputState {
             rotate_180: false,
             hold: false,
             discard: false,
+            force_i: false,
         }
     }
 }
@@ -418,6 +420,7 @@ impl From<InputFrame> for InputState {
             rotate_180: value.rotate_180,
             hold: value.hold,
             discard: value.discard,
+            force_i: value.force_i,
         }
     }
 }
@@ -880,7 +883,8 @@ struct Player {
     queue: Vec<Tetromino>,
     hold: Option<Tetromino>,
     held_on_turn: bool,
-    last_action_was_t_spin: bool,
+    last_action_was_rotation: bool,
+    last_kick: (i32, i32),
     randomizer: Box<dyn Randomizer>,
     randomizer_kind: RandomizerKind,
     topped_out: bool,
@@ -906,7 +910,8 @@ impl Player {
             queue,
             hold: None,
             held_on_turn: false,
-            last_action_was_t_spin: false,
+            last_action_was_rotation: false,
+            last_kick: (0, 0),
             randomizer,
             randomizer_kind,
             topped_out: false,
@@ -939,7 +944,7 @@ impl Player {
 
     fn spawn_next(&mut self) {
         self.held_on_turn = false;
-        self.last_action_was_t_spin = false;
+        self.last_action_was_rotation = false;
         let next_piece = self.queue.remove(0);
         self.refill_queue();
         self.active = ActivePiece::new(next_piece);
@@ -975,6 +980,8 @@ impl Player {
         let mut overflow = false;
         self.board
             .lock_piece(self.active.x, self.active.y, &blocks, color);
+        let potential_t_spin =
+            detect_t_spin(&self.board, &self.active, self.last_action_was_rotation, self.last_kick);
         let cleared = self.board.clear_lines();
         for b in blocks {
             let py = self.active.y + b.y as i32;
@@ -983,7 +990,7 @@ impl Player {
                 break;
             }
         }
-        let was_t_spin = self.last_action_was_t_spin && self.active.piece == Tetromino::T && cleared > 0;
+        let was_t_spin = potential_t_spin && cleared > 0;
         self.spawn_next();
         (cleared, was_t_spin, overflow)
     }
@@ -1022,7 +1029,7 @@ impl Versus {
                     _ => self.attack_table._4_lines as u32,
                 }
             };
-
+            let base_attack = attack;
             let combo_idx = player.combo.saturating_sub(1);
             let combo_bonus = match combo_idx {
                 0 => self.combo_table.c0,
@@ -1042,8 +1049,9 @@ impl Versus {
             attack = attack.saturating_add(combo_bonus);
 
             let difficult = cleared >= 4 || (is_t_spin && cleared > 0);
+            let prev_b2b = player.back_to_back;
             let mut b2b_bonus = 0;
-            if player.back_to_back && difficult {
+            if prev_b2b && difficult {
                 b2b_bonus = self.attack_table.back_to_back_bonus as u32;
                 attack = attack.saturating_add(b2b_bonus);
             }
@@ -1090,7 +1098,7 @@ impl Versus {
                     }
                 };
                 let mut parts = Vec::new();
-                parts.push(format!("+{} {}", attack_before_cancel, base_label));
+                parts.push(format!("+{} {}", base_attack, base_label));
                 if combo_bonus > 0 {
                     parts.push(format!("+{} combo bonus", combo_bonus));
                 }
@@ -1157,6 +1165,7 @@ pub struct InputFrame {
     pub rotate_180: bool,
     pub hold: bool,
     pub discard: bool,
+    pub force_i: bool,
 }
 
 impl Default for InputFrame {
@@ -1171,6 +1180,7 @@ impl Default for InputFrame {
             rotate_180: false,
             hold: false,
             discard: false,
+            force_i: false,
         }
     }
 }
@@ -1187,6 +1197,7 @@ impl From<InputState> for InputFrame {
             rotate_180: value.rotate_180,
             hold: value.hold,
             discard: value.discard,
+            force_i: value.force_i,
         }
     }
 }
@@ -1203,6 +1214,7 @@ fn count_input_edges(prev: &InputState, curr: &InputState) -> u32 {
         (prev.rotate_180, curr.rotate_180),
         (prev.hold, curr.hold),
         (prev.discard, curr.discard),
+        (prev.force_i, curr.force_i),
     ];
     for (p, c) in fields {
         if !p && c {
@@ -1223,6 +1235,7 @@ struct Controller {
     last_rotate_ccw: bool,
     last_rotate_180: bool,
     last_discard: bool,
+    last_force_i: bool,
 }
 
 impl Controller {
@@ -1238,6 +1251,7 @@ impl Controller {
             last_rotate_ccw: false,
             last_rotate_180: false,
             last_discard: false,
+            last_force_i: false,
         }
     }
 
@@ -1251,6 +1265,7 @@ impl Controller {
         self.inputs.rotate_180 = incoming.rotate_180;
         self.inputs.hold = incoming.hold;
         self.inputs.discard = incoming.discard;
+        self.inputs.force_i = incoming.force_i;
     }
 
     fn take_hard_drop(&mut self) -> bool {
@@ -1280,6 +1295,12 @@ impl Controller {
     fn take_discard(&mut self) -> bool {
         let fire = self.inputs.discard && !self.last_discard;
         self.last_discard = self.inputs.discard;
+        fire
+    }
+
+    fn take_force_i(&mut self) -> bool {
+        let fire = self.inputs.force_i && !self.last_force_i;
+        self.last_force_i = self.inputs.force_i;
         fire
     }
 }
@@ -1318,6 +1339,7 @@ impl BotDriver {
             rotate_180: false,
             hold: false,
             discard: false,
+            force_i: false,
         };
         self.think_timer += dt_ms;
         let piece_time = 1000.0 / self.config.pps.max(0.1);
@@ -1364,6 +1386,7 @@ fn find_safe_column(board: &Board, piece: Tetromino) -> Option<InputFrame> {
             rotate_180: false,
             hold: false,
             discard: false,
+            force_i: false,
         };
         if col < 4 {
             frame.left = true;
@@ -1467,6 +1490,10 @@ impl Versus {
             self.discard_piece(idx);
             return;
         }
+        if self.controllers[idx].take_force_i() {
+            self.force_piece(idx, Tetromino::I);
+            return;
+        }
         let dir = match (inputs.left, inputs.right) {
             (true, false) => -1,
             (false, true) => 1,
@@ -1566,6 +1593,7 @@ impl Versus {
             return false;
         }
         self.players[idx].active = test;
+        self.players[idx].last_action_was_rotation = false;
         true
     }
 
@@ -1578,6 +1606,7 @@ impl Versus {
             return false;
         }
         self.players[idx].active = test;
+        self.players[idx].last_action_was_rotation = false;
         true
     }
 
@@ -1600,8 +1629,9 @@ impl Versus {
             };
             if !self.players[idx].board.collision(&test) {
                 self.players[idx].active = test;
-                self.players[idx].last_action_was_t_spin =
+                self.players[idx].last_action_was_rotation =
                     self.players[idx].active.piece == Tetromino::T;
+                self.players[idx].last_kick = (*dx, *dy);
                 return true;
             }
         }
@@ -1630,6 +1660,7 @@ impl Versus {
         }
         player.combo = 0;
         player.back_to_back = false;
+        player.last_action_was_rotation = false;
         // Apply any pending garbage now that the chain is broken.
         if !player.pending_garbage.is_empty() {
             let batches = std::mem::take(&mut player.pending_garbage);
@@ -1646,6 +1677,21 @@ impl Versus {
         }
         player.spawn_next();
         self.stats[idx].pieces = self.stats[idx].pieces.saturating_add(1);
+        self.fall_accum[idx] = 0.0;
+    }
+
+    fn force_piece(&mut self, idx: usize, piece: Tetromino) {
+        let player = &mut self.players[idx];
+        if player.topped_out {
+            return;
+        }
+        player.active = ActivePiece::new(piece);
+        player.active.y = (VISIBLE_HEIGHT as i32) - 1;
+        player.active.x = 4;
+        player.held_on_turn = false;
+        player.last_action_was_rotation = false;
+        player.combo = 0;
+        player.back_to_back = false;
         self.fall_accum[idx] = 0.0;
     }
 
@@ -1886,6 +1932,18 @@ impl Versus {
                 // Our I vertical column is shifted +1 relative to TBP coords; align to TBP pivot.
                 player.active.x -= 1;
             }
+            if desired_piece == Tetromino::T {
+                if let Some(spin) = mv.spin.clone().known() {
+                    match spin {
+                        tbp_data::Spin::None => {}
+                        tbp_data::Spin::Mini | tbp_data::Spin::Full => {
+                            player.last_action_was_rotation = true;
+                            player.last_kick = (2, 1); // treat as a kicked rotation to satisfy mini rule if needed
+                        }
+                        _ => {}
+                    }
+                }
+            }
             if player.board.collision(&player.active) {
                 // If the suggested y collides, try dropping to the lowest legal height for this x/rotation.
                 let shape = player.active.blocks();
@@ -2099,6 +2157,7 @@ impl GameClient {
             rotate_180: parsed.rotate_180,
             hold: parsed.hold,
             discard: parsed.discard,
+            force_i: parsed.force_i,
         };
         Ok(())
     }
@@ -2147,4 +2206,53 @@ impl GameClient {
             .map_err(|e| JsValue::from_str(&e))?;
         serde_json::to_string(&start).map_err(|e| JsValue::from_str(&e.to_string()))
     }
+}
+fn detect_t_spin(board: &Board, active: &ActivePiece, last_rotation: bool, last_kick: (i32, i32)) -> bool {
+    if active.piece != Tetromino::T {
+        return false;
+    }
+    if !last_rotation {
+        return false;
+    }
+    let cx = active.x;
+    let cy = active.y;
+    let corners = [
+        (cx - 1, cy + 1),
+        (cx + 1, cy + 1),
+        (cx - 1, cy - 1),
+        (cx + 1, cy - 1),
+    ];
+    let mut occupied = [false; 4];
+    for (i, (x, y)) in corners.iter().enumerate() {
+        occupied[i] = board.is_occupied(*x, *y);
+    }
+    let occupied_count = occupied.iter().filter(|v| **v).count();
+    if occupied_count < 3 {
+        return false;
+    }
+    let front = match active.rotation {
+        Rotation::Spawn => [0, 1],
+        Rotation::Right => [0, 2],
+        Rotation::Reverse => [2, 3],
+        Rotation::Left => [1, 3],
+    };
+    let back = match active.rotation {
+        Rotation::Spawn => [2, 3],
+        Rotation::Right => [1, 3],
+        Rotation::Reverse => [0, 1],
+        Rotation::Left => [0, 2],
+    };
+    let front_count = occupied[front[0]] as u8 + occupied[front[1]] as u8;
+    let back_count = occupied[back[0]] as u8 + occupied[back[1]] as u8;
+    if front_count == 2 && back_count >= 1 {
+        return true;
+    }
+    if front_count == 1 && back_count == 2 {
+        let (dx, dy) = last_kick;
+        if dx.abs() + dy.abs() >= 3 {
+            return true;
+        }
+        return false;
+    }
+    true
 }
