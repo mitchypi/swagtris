@@ -213,6 +213,8 @@ pub enum RandomizerKind {
     FiveBag,
     SinglePiece { piece: Tetromino },
     LoveTris,
+    LoveTrisNoBag,
+    LoveTrisOriginal,
 }
 
 impl Default for RandomizerKind {
@@ -367,6 +369,129 @@ impl Randomizer for LoveTris {
     }
 }
 
+struct LoveTrisNoBag {
+    give_t: bool,
+}
+
+impl LoveTrisNoBag {
+    fn new() -> Self {
+        Self { give_t: true }
+    }
+
+    fn landing_y(board: &Board, x: i32, shape: &[Point; 4]) -> Option<i32> {
+        let mut last_valid: Option<i32> = None;
+        for y in 0..(TOTAL_HEIGHT as i32) {
+            let valid = shape.iter().all(|b| {
+                let px = x + b.x as i32;
+                let py = y + b.y as i32;
+                px >= 0
+                    && px < WIDTH as i32
+                    && py >= 0
+                    && py < TOTAL_HEIGHT as i32
+                    && !board.is_occupied(px, py)
+            });
+            if valid {
+                last_valid = Some(y);
+            } else {
+                break;
+            }
+        }
+        last_valid
+    }
+
+    fn best_score(board: &Board, piece: Tetromino) -> Option<(i32, usize, i32, usize, usize)> {
+        let mut best: Option<(i32, usize, i32, usize, usize)> = None;
+        for rot in [
+            Rotation::Spawn,
+            Rotation::Right,
+            Rotation::Reverse,
+            Rotation::Left,
+        ] {
+            let shape = shape_blocks(piece, rot);
+            for x in -2..WIDTH as i32 + 2 {
+                if let Some(h) = Self::landing_y(board, x, &shape) {
+                    let mut simulated = board.clone();
+                    simulated.lock_piece(x, h, &shape, piece.color_id());
+                    let lines = simulated.clear_lines() as i32;
+                    let height = simulated.max_height();
+                    let bump = simulated.bumpiness();
+                    let holes = simulated.hole_count();
+                    let score =
+                        -30 * holes as i32 - 8 * 0 - 6 * (height as i32) - 2 * bump as i32 + 10 * lines;
+                    if best
+                        .map_or(true, |(bs, bh, bl, bb, bhole)| {
+                            score > bs
+                                || (score == bs
+                                    && (height < bh
+                                        || (height == bh
+                                            && (lines > bl
+                                                || (lines == bl
+                                                    && (bump < bb || (bump == bb && holes < bhole)))))))
+                        })
+                    {
+                        best = Some((score, height, lines, bump, holes));
+                    }
+                }
+            }
+        }
+        best
+    }
+}
+
+impl Randomizer for LoveTrisNoBag {
+    fn next(&mut self, board: &Board) -> Tetromino {
+        // Alternate T and I pieces, ignoring the board.
+        let piece = if self.give_t {
+            Tetromino::T
+        } else {
+            Tetromino::I
+        };
+        self.give_t = !self.give_t;
+        piece
+    }
+}
+
+struct LoveTrisOriginal;
+
+impl Randomizer for LoveTrisOriginal {
+    fn next(&mut self, board: &Board) -> Tetromino {
+        let order = [
+            Tetromino::T,
+            Tetromino::I,
+            Tetromino::L,
+            Tetromino::J,
+            Tetromino::O,
+            Tetromino::S,
+            Tetromino::Z,
+        ];
+        let mut best_piece = Tetromino::T;
+        let mut best_height: Option<usize> = None;
+        for piece in order {
+            for rot in [
+                Rotation::Spawn,
+                Rotation::Right,
+                Rotation::Reverse,
+                Rotation::Left,
+            ] {
+                let shape = shape_blocks(piece, rot);
+                for x in -2..WIDTH as i32 + 2 {
+                    if let Some(h) = LoveTrisNoBag::landing_y(board, x, &shape) {
+                        let mut simulated = board.clone();
+                        simulated.lock_piece(x, h, &shape, piece.color_id());
+                        let _ = simulated.clear_lines();
+                        let height = simulated.max_height();
+                        if best_height.map_or(true, |bh| height < bh) {
+                            best_height = Some(height);
+                            best_piece = piece;
+                        }
+                    }
+                }
+            }
+        }
+        best_piece
+    }
+}
+
 fn randomizer_from_kind(kind: RandomizerKind) -> Box<dyn Randomizer> {
     match kind {
         RandomizerKind::TrueRandom => Box::new(TrueRandom),
@@ -374,6 +499,8 @@ fn randomizer_from_kind(kind: RandomizerKind) -> Box<dyn Randomizer> {
         RandomizerKind::FiveBag => Box::new(FiveBag::new()),
         RandomizerKind::SinglePiece { piece } => Box::new(SinglePiece { piece }),
         RandomizerKind::LoveTris => Box::new(LoveTris::new()),
+        RandomizerKind::LoveTrisNoBag => Box::new(LoveTrisNoBag::new()),
+        RandomizerKind::LoveTrisOriginal => Box::new(LoveTrisOriginal),
     }
 }
 
@@ -681,6 +808,27 @@ impl Board {
             }
         }
         0
+    }
+
+    fn column_height(&self, x: usize) -> usize {
+        for y in (0..TOTAL_HEIGHT).rev() {
+            if self.cells[y][x] != 0 {
+                return y + 1;
+            }
+        }
+        0
+    }
+
+    fn bumpiness(&self) -> usize {
+        let mut heights = [0usize; WIDTH];
+        for x in 0..WIDTH {
+            heights[x] = self.column_height(x);
+        }
+        let mut bump = 0usize;
+        for w in 0..(WIDTH - 1) {
+            bump += heights[w].max(heights[w + 1]) - heights[w].min(heights[w + 1]);
+        }
+        bump
     }
 
     fn visible_empty(&self) -> bool {

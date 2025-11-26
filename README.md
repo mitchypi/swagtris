@@ -3,6 +3,21 @@
 # Rust + WebAssembly Tetris (1v1 vs coldclear2)
 My motivation for building this was having a platform to play against a tetris bot with wacky randomizers such as 5-bag which is everything but S and Z pieces.
 100% guideline compatible, with all kicks and SRS.
+## Features
+- 100% Guideline Tetris
+- Jstris attack and combo tables
+- SRS
+- Adjustable DAS/ARR/Soft Drop speeds
+- New Wacky Randomizers:
+    - 5 bag: Seven bag without the pesky S and Z pieces
+    - Lovetris (no preview): Assigns pieces based on piece with best best-case scenario based on stack height
+    - Single piece: Choose a piece to solely get
+    - Lovetris with preview: Same as lovetris but with a preview so it does multiple look aheads
+- Wacky cheat buttons: Discard current piece and force current piece to be an I piece
+- Play against coldclear2
+
+
+
 ## Building
 1) Install the wasm target and wasm-pack if you have not yet:
 ```bash
