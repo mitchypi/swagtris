@@ -6,13 +6,16 @@ My motivation for building this was having a platform to play against a tetris b
 ## Features
 - 100% Guideline Tetris
 - Jstris attack and combo tables
+- Attack history
 - SRS
 - Adjustable DAS/ARR/Soft Drop speeds
 - New Wacky Randomizers:
     - 5 bag: Seven bag without the pesky S and Z pieces
-    - Lovetris (no preview): Assigns pieces based on piece with best best-case scenario based on stack height
+    - Lovetris 2-bag: Gives alternating t and I pieces
     - Single piece: Choose a piece to solely get
-    - Lovetris with preview: Same as lovetris but with a preview so it does multiple look aheads
+    - Lovetris original: Hatris heuristic flipped
+    - Lovetris with preview: Same as lovetris original with a preview
+    
 - Wacky cheat buttons: Discard current piece and force current piece to be an I piece
 - Play against coldclear2
 
